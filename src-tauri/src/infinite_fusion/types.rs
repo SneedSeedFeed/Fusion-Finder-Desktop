@@ -159,7 +159,6 @@ impl<'de> Visitor<'de> for TypeDexVisitor {
 
         #[derive(Deserialize)]
         struct _TypeDetails {
-            // as_transparent since iirc the string is ivar wrapped
             #[serde(rename = "@real_name")]
             real_name: Box<str>,
             #[serde(rename = "@weaknesses")]
