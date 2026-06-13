@@ -5,6 +5,7 @@ use crate::infinite_fusion::{
     Dex,
     items::{ItemDex, ItemId},
     moves::{MoveDex, MoveId},
+    species::SpeciesId,
 };
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -15,7 +16,7 @@ pub struct UnmappedEvolution<'a> {
 }
 
 impl<'a> UnmappedEvolution<'a> {
-    pub(crate) fn assign_id<T>(self, id: T) -> Evolution<T> {
+    pub(crate) fn assign_id(self, id: SpeciesId) -> Evolution {
         let target = self.target.assign_id(id);
         Evolution {
             target,
@@ -29,8 +30,8 @@ impl<'a> UnmappedEvolution<'a> {
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
-pub struct Evolution<T> {
-    target: EvolutionTarget<T>,
+pub struct Evolution {
+    target: EvolutionTarget,
     kind: EvolutionKind,
 }
 
@@ -193,7 +194,7 @@ impl<'a> UnmappedEvolutionTarget<'a> {
         }
     }
 
-    pub(crate) fn assign_id<T>(self, id: T) -> EvolutionTarget<T> {
+    pub(crate) fn assign_id(self, id: SpeciesId) -> EvolutionTarget {
         match self {
             UnmappedEvolutionTarget::From(_) => EvolutionTarget::From { target: id },
             UnmappedEvolutionTarget::Into(_) => EvolutionTarget::Into { target: id },
@@ -203,7 +204,7 @@ impl<'a> UnmappedEvolutionTarget<'a> {
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
-pub enum EvolutionTarget<T> {
-    From { target: T },
-    Into { target: T },
+pub enum EvolutionTarget {
+    From { target: SpeciesId },
+    Into { target: SpeciesId },
 }
