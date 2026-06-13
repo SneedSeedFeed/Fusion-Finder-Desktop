@@ -234,6 +234,7 @@ impl<'de> Visitor<'de> for TypeDexVisitor {
             );
         }
 
+        map.shrink_to_fit(); // immutable so might as well reclaim
         Ok(TypeDex {
             flying_id: flying_idx
                 .ok_or_else(|| serde::de::Error::custom("type dex did not contain the flying type, its presence is essential for NORMAL/FLYING fusion logic"))
@@ -247,7 +248,7 @@ impl<'de> Visitor<'de> for TypeDexVisitor {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
 
     use reikland::DeserializerConfig;
 
@@ -256,13 +257,16 @@ mod test {
         test::infinite_fusion_dir,
     };
 
-    #[test]
-    fn deser_types_dat() {
+    pub(crate) fn load_types() -> TypeDex {
         let data = std::fs::read(infinite_fusion_dir().join(TypeDex::relative_path())).unwrap();
 
-        let types =
-            reikland::from_bytes_with_config::<TypeDex>(&data, DeserializerConfig::opinionated())
-                .unwrap();
+        reikland::from_bytes_with_config::<TypeDex>(&data, DeserializerConfig::opinionated())
+            .unwrap()
+    }
+
+    #[test]
+    fn deser_types_dat() {
+        let types = load_types();
 
         // find steel type (my fave)
         let (steel_id, steel_details) = types.get_full_by_key("STEEL").unwrap();
