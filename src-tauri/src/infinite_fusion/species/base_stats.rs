@@ -1,11 +1,11 @@
 macro_rules! create_base_stats {
-    ($name:ident, $($stat:ident),*) => {
+    ($name:ident, $($stat:ident => $key:literal),* $(,)?) => {
         #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
         pub struct $name {
-            $($stat: u8,)*
+            $(#[serde(rename = $key)] $stat: u8,)*
         }
 
-        impl BaseStats {
+        impl $name {
             $(pub fn $stat(&self) -> u8 {
                 self.$stat
             })*
@@ -13,7 +13,15 @@ macro_rules! create_base_stats {
     };
 }
 
-create_base_stats!(BaseStats, hp, atk, def, spa, spd, spe);
+create_base_stats!(
+    BaseStats,
+    hp => "HP",
+    atk => "ATTACK",
+    def => "DEFENSE",
+    spa => "SPECIAL_ATTACK",
+    spd => "SPECIAL_DEFENSE",
+    spe => "SPEED",
+);
 
 impl BaseStats {
     pub fn fuse(&self, body: &Self) -> Self {
