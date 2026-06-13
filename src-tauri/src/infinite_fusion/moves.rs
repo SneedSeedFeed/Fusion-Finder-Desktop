@@ -103,7 +103,7 @@ impl<'de> Deserialize<'de> for MoveCategory {
         match u8::deserialize(deserializer)? {
             0 => Ok(Self::Physical),
             1 => Ok(Self::Special),
-            3 => Ok(Self::Status),
+            2 => Ok(Self::Status),
             other => Err(serde::de::Error::invalid_value(
                 Unexpected::Unsigned(other as u64),
                 &"0, 1 or 2",
@@ -254,30 +254,30 @@ pub(crate) mod test {
     use crate::{
         infinite_fusion::{
             Dex,
-            moves::{MoveDex, MoveDexDeser},
-            types::TypeDex,
+            moves::{MoveCategory, MoveDex, MoveDexDeser},
         },
         test::infinite_fusion_dir,
     };
     use reikland::DeserializerConfig;
-    use serde::Deserializer;
+    use serde::de::DeserializeSeed;
 
     pub(crate) fn load_moves() -> MoveDex {
         let types = crate::infinite_fusion::types::test::load_types();
 
-        let data = std::fs::read(infinite_fusion_dir().join(TypeDex::relative_path())).unwrap();
+        let data = std::fs::read(infinite_fusion_dir().join(MoveDex::relative_path())).unwrap();
         let mut deser =
             reikland::Deserializer::with_config(&data, DeserializerConfig::opinionated()).unwrap();
 
-        deser.deserialize_seed(MoveDexDeser(&types))
+        MoveDexDeser(&types).deserialize(&mut deser).unwrap()
     }
 
     #[test]
-    fn deser_types_dat() {
-        let data = std::fs::read(infinite_fusion_dir().join(TypeDex::relative_path())).unwrap();
+    fn deser_moves_dat() {
+        let moves = load_moves();
+        assert!(!moves.is_empty());
 
-        let types =
-            reikland::from_bytes_with_config::<TypeDex>(&data, DeserializerConfig::opinionated())
-                .unwrap();
+        let tackle = moves.get_by_key("TACKLE").expect("TACKLE should exist");
+        assert_eq!(tackle.category, MoveCategory::Physical);
+        assert!(tackle.power.is_some());
     }
 }
