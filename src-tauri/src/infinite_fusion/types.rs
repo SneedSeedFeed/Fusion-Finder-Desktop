@@ -253,34 +253,48 @@ pub(crate) mod test {
 
     use crate::{
         infinite_fusion::{Dex, types::TypeDex},
-        test::infinite_fusion_dir,
+        test::{infinite_fusion_dir, infinite_fusion_hoenn_dir, maybe_decrypt},
     };
 
-    pub(crate) fn load_types() -> TypeDex {
-        let data = std::fs::read(infinite_fusion_dir().join(TypeDex::relative_path())).unwrap();
+    pub(crate) fn load_types() -> [TypeDex; 2] {
+        let data = maybe_decrypt(
+            std::fs::read(infinite_fusion_dir().join(TypeDex::relative_path())).unwrap(),
+        );
+        let hoenn_data = maybe_decrypt(
+            std::fs::read(infinite_fusion_hoenn_dir().join(TypeDex::relative_path())).unwrap(),
+        );
 
-        reikland::from_bytes_with_config::<TypeDex>(&data, DeserializerConfig::opinionated())
-            .unwrap()
+        [
+            reikland::from_bytes_with_config::<TypeDex>(&data, DeserializerConfig::opinionated())
+                .unwrap(),
+            reikland::from_bytes_with_config::<TypeDex>(
+                &hoenn_data,
+                DeserializerConfig::opinionated(),
+            )
+            .unwrap(),
+        ]
     }
 
     #[test]
     fn deser_types_dat() {
         let types = load_types();
 
-        // find steel type (my fave)
-        let (steel_id, steel_details) = types.get_full_by_key("STEEL").unwrap();
-        // find fire
-        let (fire_id, fire_details) = types.get_full_by_key("FIRE").unwrap();
+        for types in types {
+            // find steel type (my fave)
+            let (steel_id, steel_details) = types.get_full_by_key("STEEL").unwrap();
+            // find fire
+            let (fire_id, fire_details) = types.get_full_by_key("FIRE").unwrap();
 
-        assert!(steel_details.weaknesses.contains(fire_id));
-        assert!(fire_details.resistances.contains(steel_id));
+            assert!(steel_details.weaknesses.contains(fire_id));
+            assert!(fire_details.resistances.contains(steel_id));
 
-        let normal_id = types.normal_id;
-        // normal is normal?!?!?!
-        let (normal_key, normal_details) = types.get(normal_id);
-        let (ghost_id, ghost_details) = types.get_full_by_key("GHOST").unwrap();
-        assert_eq!(normal_key, "NORMAL");
-        assert!(normal_details.immunities.contains(ghost_id));
-        assert!(ghost_details.immunities.contains(normal_id));
+            let normal_id = types.normal_id;
+            // normal is normal?!?!?!
+            let (normal_key, normal_details) = types.get(normal_id);
+            let (ghost_id, ghost_details) = types.get_full_by_key("GHOST").unwrap();
+            assert_eq!(normal_key, "NORMAL");
+            assert!(normal_details.immunities.contains(ghost_id));
+            assert!(ghost_details.immunities.contains(normal_id));
+        }
     }
 }

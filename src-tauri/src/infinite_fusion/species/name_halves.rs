@@ -39,6 +39,10 @@ impl NameMap {
         Path::new("Data/Scripts/052_InfiniteFusion/Fusion/SplitNames.rb")
     }
 
+    pub fn relative_path_hoenn() -> &'static Path {
+        Path::new("Data/Scripts/052_InfiniteFusion/Fusion/Data/SplitNames.rb")
+    }
+
     fn get_idx(&self, fusion_dex_num: u16) -> Option<usize> {
         if fusion_dex_num < 252 {
             Some(fusion_dex_num as usize)
@@ -50,6 +54,13 @@ impl NameMap {
     pub fn get_name_halves(&self, fusion_dex_num: u16) -> Option<&NameHalves> {
         self.get_idx(fusion_dex_num)
             .and_then(|idx| self.map.get(idx))
+    }
+
+    /// Direct lookup by national dex number (which is exactly the index into `SPLIT_NAMES`),
+    /// skipping the fusion-dex translation. Used for form species like Hoenn's `SHELLOS_E`
+    /// that share a base species' name but have no fusion-dex mapping of their own.
+    pub fn get_by_national_dex(&self, national_dex: u16) -> Option<&NameHalves> {
+        self.map.get(national_dex as usize)
     }
 
     pub fn from_file<P: AsRef<Path>>(file_path: P) -> Result<Self, FromFileError> {

@@ -4,6 +4,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, de::DeserializeSeed};
 
 pub mod abilities;
+pub mod encounters;
 pub mod items;
 pub mod moves;
 pub mod species;
@@ -29,6 +30,10 @@ pub trait Dex {
             .get_index(id.to_usize())
             .map(|(k, v)| (k.deref(), v))
             .expect("unmapped id")
+    }
+
+    fn get_item(&self, id: Self::Id) -> &Self::Item {
+        self.map().get_index(id.to_usize()).map(|(_, v)| v).unwrap()
     }
 
     fn len(&self) -> usize {
@@ -73,11 +78,15 @@ where
     type Item = T::Item;
 
     fn map(&self) -> &IndexMap<Box<str>, Self::Item> {
-        todo!()
+        <T as Dex>::map(self)
     }
 
     fn get(&self, id: Self::Id) -> (&str, &Self::Item) {
         <T as Dex>::get(self, id)
+    }
+
+    fn get_item(&self, id: Self::Id) -> &Self::Item {
+        <T as Dex>::get_item(self, id)
     }
 
     fn len(&self) -> usize {

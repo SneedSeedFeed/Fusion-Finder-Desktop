@@ -257,28 +257,35 @@ pub(crate) mod test {
             Dex,
             moves::{MoveCategory, MoveDex, MoveDexDeser},
         },
-        test::infinite_fusion_dir,
+        test::{infinite_fusion_dir, infinite_fusion_hoenn_dir, maybe_decrypt},
     };
     use reikland::DeserializerConfig;
     use serde::de::DeserializeSeed;
 
-    pub(crate) fn load_moves() -> MoveDex {
+    /// `[classic, hoenn]`
+    pub(crate) fn load_moves() -> [MoveDex; 2] {
+        let dirs = [infinite_fusion_dir(), infinite_fusion_hoenn_dir()];
         let types = crate::infinite_fusion::types::test::load_types();
 
-        let data = std::fs::read(infinite_fusion_dir().join(MoveDex::relative_path())).unwrap();
-        let mut deser =
-            reikland::Deserializer::with_config(&data, DeserializerConfig::opinionated()).unwrap();
+        std::array::from_fn(|i| {
+            let data =
+                maybe_decrypt(std::fs::read(dirs[i].join(MoveDex::relative_path())).unwrap());
+            let mut deser =
+                reikland::Deserializer::with_config(&data, DeserializerConfig::opinionated())
+                    .unwrap();
 
-        MoveDexDeser(&types).deserialize(&mut deser).unwrap()
+            MoveDexDeser(&types[i]).deserialize(&mut deser).unwrap()
+        })
     }
 
     #[test]
     fn deser_moves_dat() {
-        let moves = load_moves();
-        assert!(!moves.is_empty());
+        for moves in load_moves() {
+            assert!(!moves.is_empty());
 
-        let tackle = moves.get_by_key("TACKLE").expect("TACKLE should exist");
-        assert_eq!(tackle.category, MoveCategory::Physical);
-        assert!(tackle.power.is_some());
+            let tackle = moves.get_by_key("TACKLE").expect("TACKLE should exist");
+            assert_eq!(tackle.category, MoveCategory::Physical);
+            assert!(tackle.power.is_some());
+        }
     }
 }

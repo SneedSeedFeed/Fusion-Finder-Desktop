@@ -106,8 +106,20 @@ impl UnmappedSpeciesDetails<'_> {
 
         dex.into_iter()
             .zip_eq(all_evos)
-            .map(|((key, v), evos)| Ok((key, v.assign_evos(evos, types, name_map)?)))
+            .map(|((key, v), evos)| {
+                let details = v.assign_evos(evos, types, name_map, &key)?;
+                Ok((key, details))
+            })
             .collect()
+    }
+
+    /// Form species share their base species' fusion name but carry no fusion-dex mapping of their own, so they're resolved by the base species' national dex number instead.
+    fn name_dex_override(symbol: &str) -> Option<u16> {
+        Some(match symbol {
+            "SHELLOS_E" | "SHELLOS_W" => 422,     // Shellos
+            "GASTRODON_E" | "GASTRODON_W" => 423, // Gastrodon
+            _ => return None,
+        })
     }
 
     fn map_evos(
@@ -131,14 +143,17 @@ impl UnmappedSpeciesDetails<'_> {
         evolutions: Box<[Evolution]>,
         types: &TypeDex,
         name_map: &NameMap,
+        symbol: &str,
     ) -> Result<SpeciesDetails, SpeciesMapError> {
         let id_number = self.id_number as u16;
-        let names = name_map
-            .get_name_halves(id_number)
-            .context(NameNotFoundSnafu {
-                dex_number: id_number,
-            })?
-            .clone();
+        let names = match Self::name_dex_override(symbol) {
+            Some(national_dex) => name_map.get_by_national_dex(national_dex),
+            None => name_map.get_name_halves(id_number),
+        }
+        .context(NameNotFoundSnafu {
+            dex_number: id_number,
+        })?
+        .clone();
 
         let type1 = types.get_id_of(self.type1).context(TypeNotFoundSnafu {
             type_name: self.type1,
@@ -278,6 +293,7 @@ impl<'a, 'de> Visitor<'de> for UnmappedSpeciesDetailsDeser<'a> {
             match key {
                 "@id_number" => {
                     let n = map.next_value::<u32>()?;
+                    // Discard triple fusions: their dex numbers overflow u16 and we don't model them.
                     discard = n >= u32::from(u16::MAX);
                     id_number = Some(n);
                 }
@@ -351,47 +367,69 @@ pub(crate) mod test {
             species::{SpeciesDex, SpeciesDexDeser},
             types::test::load_types,
         },
-        test::infinite_fusion_dir,
+        test::{infinite_fusion_dir, infinite_fusion_hoenn_dir, maybe_decrypt},
     };
 
     use super::name_halves::NameMap;
 
-    pub(crate) fn load_species() -> SpeciesDex {
+    /// `[classic, hoenn]`
+    pub(crate) fn load_species() -> [SpeciesDex; 2] {
+        let dirs = [infinite_fusion_dir(), infinite_fusion_hoenn_dir()];
+        // SplitNames.rb sits at a different relative path in Hoenn (extra `Data/` segment).
+        let name_paths = [
+            infinite_fusion_dir().join(NameMap::relative_path()),
+            infinite_fusion_hoenn_dir().join(NameMap::relative_path_hoenn()),
+        ];
+
         let types = load_types();
         let moves = load_moves();
         let abilities = load_abilities();
         let items = load_items();
-        let name_map =
-            NameMap::from_file(infinite_fusion_dir().join(NameMap::relative_path())).unwrap();
 
-        let data = std::fs::read(infinite_fusion_dir().join(SpeciesDex::relative_path())).unwrap();
-        let mut deser =
-            reikland::Deserializer::with_config(&data, DeserializerConfig::opinionated()).unwrap();
+        std::array::from_fn(|i| {
+            let name_map = NameMap::from_file(&name_paths[i]).unwrap();
 
-        SpeciesDexDeser {
-            moves: &moves,
-            items: &items,
-            abilities: &abilities,
-            types: &types,
-            name_map: &name_map,
-        }
-        .deserialize(&mut deser)
-        .unwrap()
+            let data =
+                maybe_decrypt(std::fs::read(dirs[i].join(SpeciesDex::relative_path())).unwrap());
+            let mut deser =
+                reikland::Deserializer::with_config(&data, DeserializerConfig::opinionated())
+                    .unwrap();
+
+            SpeciesDexDeser {
+                moves: &moves[i],
+                items: &items[i],
+                abilities: &abilities[i],
+                types: &types[i],
+                name_map: &name_map,
+            }
+            .deserialize(&mut deser)
+            .unwrap()
+        })
     }
 
     #[test]
     fn deser_species_dat() {
-        let species = load_species();
-        assert!(!species.is_empty());
+        let [classic, hoenn] = load_species();
 
-        let bulbasaur = species.get_by_key("BULBASAUR").expect("BULBASAUR exists");
-        assert!(bulbasaur.type2.is_some());
-        assert!(!bulbasaur.moves.is_empty());
-        assert_eq!(bulbasaur.evolutions.len(), 1);
-        assert!(species.get_id_of("IVYSAUR").is_some());
+        for species in [&classic, &hoenn] {
+            assert!(!species.is_empty());
 
-        // best starter ever btw
-        let turtwig = species.get_by_key("TURTWIG").expect("TURTWIG exists");
-        assert!(turtwig.type2.is_none()); // turtwig should be GRASS / NONE not GRASS / GRASS after our filtering
+            let bulbasaur = species.get_by_key("BULBASAUR").expect("BULBASAUR exists");
+            assert!(bulbasaur.type2.is_some());
+            assert!(!bulbasaur.moves.is_empty());
+            assert_eq!(bulbasaur.evolutions.len(), 1);
+            assert!(species.get_id_of("IVYSAUR").is_some());
+
+            // best starter ever btw
+            let turtwig = species.get_by_key("TURTWIG").expect("TURTWIG exists");
+            assert!(turtwig.type2.is_none()); // turtwig should be GRASS / NONE not GRASS / GRASS after our filtering
+        }
+
+        // shellos line introduced in hoenn don't have separate name entries but have separate IDs so we have to hardcode for them (for now)
+        let shellos_e = hoenn
+            .get_by_key("SHELLOS_E")
+            .expect("SHELLOS_E exists in Hoenn");
+        assert_eq!(&*shellos_e.names.first_half, "Shell");
+        assert_eq!(&*shellos_e.names.second_half, "los");
     }
 }

@@ -126,28 +126,35 @@ pub(crate) mod test {
 
     use crate::{
         infinite_fusion::{Dex, items::ItemDex, items::ItemDexDeser},
-        test::infinite_fusion_dir,
+        test::{infinite_fusion_dir, infinite_fusion_hoenn_dir, maybe_decrypt},
     };
 
-    pub(crate) fn load_items() -> ItemDex {
+    /// `[classic, hoenn]`
+    pub(crate) fn load_items() -> [ItemDex; 2] {
+        let dirs = [infinite_fusion_dir(), infinite_fusion_hoenn_dir()];
         let moves = crate::infinite_fusion::moves::test::load_moves();
 
-        let data = std::fs::read(infinite_fusion_dir().join(ItemDex::relative_path())).unwrap();
-        let mut deser =
-            reikland::Deserializer::with_config(&data, DeserializerConfig::opinionated()).unwrap();
+        std::array::from_fn(|i| {
+            let data =
+                maybe_decrypt(std::fs::read(dirs[i].join(ItemDex::relative_path())).unwrap());
+            let mut deser =
+                reikland::Deserializer::with_config(&data, DeserializerConfig::opinionated())
+                    .unwrap();
 
-        ItemDexDeser(&moves).deserialize(&mut deser).unwrap()
+            ItemDexDeser(&moves[i]).deserialize(&mut deser).unwrap()
+        })
     }
 
     #[test]
     fn deser_items_dat() {
-        let items = load_items();
-        assert!(!items.is_empty());
+        for items in load_items() {
+            assert!(!items.is_empty());
 
-        let repel = items.get_by_key("REPEL").expect("REPEL should exist");
-        assert!(repel.move_taught.is_none());
+            let repel = items.get_by_key("REPEL").expect("REPEL should exist");
+            assert!(repel.move_taught.is_none());
 
-        let tm01 = items.get_by_key("TM01").expect("TM01 should exist");
-        assert!(tm01.move_taught.is_some());
+            let tm01 = items.get_by_key("TM01").expect("TM01 should exist");
+            assert!(tm01.move_taught.is_some());
+        }
     }
 }

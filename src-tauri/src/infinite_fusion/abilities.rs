@@ -100,23 +100,26 @@ pub(crate) mod test {
 
     use crate::{
         infinite_fusion::{Dex, abilities::AbilityDex},
-        test::infinite_fusion_dir,
+        test::{infinite_fusion_dir, infinite_fusion_hoenn_dir, maybe_decrypt},
     };
 
-    pub(crate) fn load_abilities() -> AbilityDex {
-        let data = std::fs::read(infinite_fusion_dir().join(AbilityDex::relative_path())).unwrap();
-
-        reikland::from_bytes_with_config::<AbilityDex>(&data, DeserializerConfig::opinionated())
-            .unwrap()
+    /// `[classic, hoenn]`
+    pub(crate) fn load_abilities() -> [AbilityDex; 2] {
+        [infinite_fusion_dir(), infinite_fusion_hoenn_dir()].map(|dir| {
+            let data = maybe_decrypt(std::fs::read(dir.join(AbilityDex::relative_path())).unwrap());
+            reikland::from_bytes_with_config::<AbilityDex>(&data, DeserializerConfig::opinionated())
+                .unwrap()
+        })
     }
 
     #[test]
     fn deser_abilities_dat() {
-        let abilities = load_abilities();
-        assert!(!abilities.is_empty());
+        for abilities in load_abilities() {
+            assert!(!abilities.is_empty());
 
-        let stench = abilities.get_by_key("STENCH").expect("STENCH should exist");
-        assert!(!stench.name.is_empty());
-        assert!(!stench.description.is_empty());
+            let stench = abilities.get_by_key("STENCH").expect("STENCH should exist");
+            assert!(!stench.name.is_empty());
+            assert!(!stench.description.is_empty());
+        }
     }
 }
