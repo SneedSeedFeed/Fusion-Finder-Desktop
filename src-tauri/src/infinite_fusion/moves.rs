@@ -22,6 +22,7 @@ use crate::{
 
 pub mod flags;
 
+#[derive(Debug, Clone)]
 pub struct MoveDex {
     map: IndexMap<Box<str>, MoveDetails>,
 }

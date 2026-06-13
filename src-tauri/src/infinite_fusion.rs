@@ -2,7 +2,10 @@ use std::{ops::Deref, path::Path};
 
 use indexmap::IndexMap;
 
+pub mod abilities;
+pub mod items;
 pub mod moves;
+pub mod species;
 pub mod types;
 
 pub trait DexId {
@@ -53,5 +56,50 @@ pub trait Dex {
         self.map()
             .get_full(key)
             .map(|(i, _, v)| (Self::Id::from_usize(i), v))
+    }
+}
+
+impl<'a, T> Dex for &'a T
+where
+    T: Dex,
+{
+    fn relative_path() -> &'static Path {
+        T::relative_path()
+    }
+
+    type Id = T::Id;
+
+    type Item = T::Item;
+
+    fn map(&self) -> &IndexMap<Box<str>, Self::Item> {
+        todo!()
+    }
+
+    fn get(&self, id: Self::Id) -> (&str, &Self::Item) {
+        <T as Dex>::get(self, id)
+    }
+
+    fn len(&self) -> usize {
+        <T as Dex>::len(self)
+    }
+
+    fn is_empty(&self) -> bool {
+        <T as Dex>::is_empty(self)
+    }
+
+    fn get_opt(&self, index: usize) -> Option<(&str, &Self::Item)> {
+        <T as Dex>::get_opt(self, index)
+    }
+
+    fn get_by_key(&self, key: &str) -> Option<&Self::Item> {
+        <T as Dex>::get_by_key(self, key)
+    }
+
+    fn get_id_of(&self, key: &str) -> Option<Self::Id> {
+        <T as Dex>::get_id_of(self, key)
+    }
+
+    fn get_full_by_key(&self, key: &str) -> Option<(Self::Id, &Self::Item)> {
+        <T as Dex>::get_full_by_key(&self, key)
     }
 }
