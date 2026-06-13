@@ -29,7 +29,7 @@ impl<'a> UnmappedEvolution<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Evolution {
     target: EvolutionTarget,
     kind: EvolutionKind,
@@ -160,7 +160,18 @@ impl<'a, 'de> serde::de::Visitor<'de> for EvolutionVisitor<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, strum::EnumDiscriminants)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Deserialize,
+    Serialize,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    strum::EnumDiscriminants,
+)]
 #[strum_discriminants[derive(EnumString, VariantNames, Deserialize, Serialize)]]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum EvolutionKind {
@@ -202,7 +213,7 @@ impl<'a> UnmappedEvolutionTarget<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum EvolutionTarget {
     From { target: SpeciesId },

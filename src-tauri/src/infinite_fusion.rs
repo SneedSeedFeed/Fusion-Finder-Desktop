@@ -1,6 +1,7 @@
 use std::{ops::Deref, path::Path};
 
 use indexmap::IndexMap;
+use serde::{Deserialize, de::DeserializeSeed};
 
 pub mod abilities;
 pub mod items;
@@ -59,7 +60,7 @@ pub trait Dex {
     }
 }
 
-impl<'a, T> Dex for &'a T
+impl<T> Dex for &T
 where
     T: Dex,
 {
@@ -100,6 +101,26 @@ where
     }
 
     fn get_full_by_key(&self, key: &str) -> Option<(Self::Id, &Self::Item)> {
-        <T as Dex>::get_full_by_key(&self, key)
+        <T as Dex>::get_full_by_key(self, key)
+    }
+}
+
+pub struct DexIdKeyVisitor<'a, T>(pub &'a T);
+
+impl<'de, 'a, T> DeserializeSeed<'de> for DexIdKeyVisitor<'a, T>
+where
+    T: Dex,
+{
+    type Value = T::Id;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        <&str as Deserialize>::deserialize(deserializer).and_then(|key| {
+            self.0
+                .get_id_of(key)
+                .ok_or_else(|| serde::de::Error::custom(format_args!("{key} not found in dex")))
+        })
     }
 }

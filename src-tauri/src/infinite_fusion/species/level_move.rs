@@ -1,11 +1,11 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::infinite_fusion::{
     Dex,
     moves::{MoveDex, MoveId},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, Hash)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LevelMove {
     move_id: MoveId,
     level: u8,
@@ -30,11 +30,13 @@ impl<'de, 'a> serde::de::DeserializeSeed<'de> for LevelMoveVisitor<'a> {
     where
         D: serde::Deserializer<'de>,
     {
-        let (level, move_key) = <(u8, &str) as Deserialize>::deserialize(deserializer)?;
-
-        match self.0.get_id_of(move_key) {
-            Some(move_id) => Ok(LevelMove { move_id, level }),
-            None => todo!(),
-        }
+        <(u8, &str) as Deserialize>::deserialize(deserializer).and_then(|(level, move_key)| {
+            self.0
+                .get_id_of(move_key)
+                .map(|move_id| LevelMove { move_id, level })
+                .ok_or_else(|| {
+                    serde::de::Error::custom(format_args!("Move {move_key} not found in MoveDex"))
+                })
+        })
     }
 }

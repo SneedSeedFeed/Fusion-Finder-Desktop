@@ -5,6 +5,7 @@ use std::{
 };
 
 use regex::Regex;
+use serde::Deserialize;
 use snafu::{OptionExt, ResultExt, Snafu};
 
 pub struct NameMap {
@@ -64,7 +65,7 @@ impl NameMap {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NameHalves {
     pub first_half: Box<str>,
     pub second_half: Box<str>,
