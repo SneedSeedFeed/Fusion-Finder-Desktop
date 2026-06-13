@@ -31,3 +31,4 @@ image = { version = "0.25.10", default-features = false, features = [] }
 phf = { version = "0.13.1", features = ["macros"] }
 strum = { version = "0.28.0", features = ["derive"] }
 snafu = "0.9.1"
+itertools = "0.14.0"

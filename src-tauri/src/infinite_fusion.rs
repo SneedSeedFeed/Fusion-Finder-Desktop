@@ -105,7 +105,15 @@ where
     }
 }
 
+#[derive(Debug)]
 pub struct DexIdKeyVisitor<'a, T>(pub &'a T);
+
+impl<T> Clone for DexIdKeyVisitor<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for DexIdKeyVisitor<'_, T> {}
 
 impl<'de, 'a, T> DeserializeSeed<'de> for DexIdKeyVisitor<'a, T>
 where
@@ -122,5 +130,43 @@ where
                 .get_id_of(key)
                 .ok_or_else(|| serde::de::Error::custom(format_args!("{key} not found in dex")))
         })
+    }
+}
+
+pub struct BoxCollector<S>(pub S);
+
+impl<'de, S> DeserializeSeed<'de> for BoxCollector<S>
+where
+    S: DeserializeSeed<'de> + Copy,
+{
+    type Value = Box<[S::Value]>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(self)
+    }
+}
+
+impl<'de, S> serde::de::Visitor<'de> for BoxCollector<S>
+where
+    S: DeserializeSeed<'de> + Copy,
+{
+    type Value = Box<[S::Value]>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("a sequence")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+        while let Some(elem) = seq.next_element_seed(self.0)? {
+            out.push(elem);
+        }
+        Ok(out.into_boxed_slice())
     }
 }

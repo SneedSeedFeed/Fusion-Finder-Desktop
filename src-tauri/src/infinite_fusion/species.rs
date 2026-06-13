@@ -1,18 +1,28 @@
+use std::path::Path;
+
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
+use itertools::Itertools;
+use reikland::MixedKeyRef;
+use serde::{
+    Deserialize, Serialize,
+    de::{DeserializeSeed, IgnoredAny, Visitor},
+};
+use snafu::{OptionExt, Snafu};
 
 use crate::{
     dex_id,
     infinite_fusion::{
-        abilities::AbilityId,
-        moves::MoveId,
+        BoxCollector, Dex, DexId, DexIdKeyVisitor,
+        abilities::{AbilityDex, AbilityId},
+        items::ItemDex,
+        moves::{MoveDex, MoveId},
         species::{
             base_stats::BaseStats,
-            evolution::{Evolution, UnmappedEvolution},
-            level_move::LevelMove,
-            name_halves::NameHalves,
+            evolution::{Evolution, EvolutionVisitor, UnmappedEvolution},
+            level_move::{LevelMove, LevelMoveVisitor},
+            name_halves::{NameHalves, NameMap},
         },
-        types::TypeId,
+        types::{TypeDex, TypeId},
     },
 };
 
@@ -26,28 +36,54 @@ pub struct SpeciesDex {
     map: IndexMap<Box<str>, SpeciesDetails>,
 }
 
+impl Dex for SpeciesDex {
+    fn relative_path() -> &'static Path {
+        Path::new("Data/species.dat")
+    }
+
+    type Id = SpeciesId;
+
+    type Item = SpeciesDetails;
+
+    fn map(&self) -> &IndexMap<Box<str>, Self::Item> {
+        &self.map
+    }
+}
+
 dex_id!(SpeciesId, u16);
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SpeciesDetails {
-    pub(crate) id_number: u16,
-    pub(crate) names: NameHalves,
-    pub(crate) type1: TypeId,
-    pub(crate) type2: Option<TypeId>,
-    pub(crate) base_stats: BaseStats,
-    pub(crate) moves: Box<[LevelMove]>,
-    pub(crate) tutor_moves: Box<[MoveId]>,
-    pub(crate) egg_moves: Box<[MoveId]>,
-    pub(crate) abilities: Box<[AbilityId]>,
-    pub(crate) hidden_abilities: Box<[AbilityId]>,
-    pub(crate) evolutions: Box<[Evolution]>,
+    pub id_number: u16,
+    pub names: NameHalves,
+    pub type1: TypeId,
+    pub type2: Option<TypeId>,
+    pub base_stats: BaseStats,
+    pub moves: Box<[LevelMove]>,
+    pub tutor_moves: Box<[MoveId]>,
+    pub egg_moves: Box<[MoveId]>,
+    pub abilities: Box<[AbilityId]>,
+    pub hidden_abilities: Box<[AbilityId]>,
+    pub evolutions: Box<[Evolution]>,
+}
+
+/// Errors when resolving species details
+#[derive(Debug, Snafu)]
+pub enum SpeciesMapError {
+    #[snafu(display("type {type_name:?} not found in the TypeDex"))]
+    TypeNotFound { type_name: Box<str> },
+
+    #[snafu(display("evolution target {target:?} not found in the species dex"))]
+    EvolutionTargetNotFound { target: Box<str> },
+
+    #[snafu(display("fusion dex number {dex_number} not found in the NameMap"))]
+    NameNotFound { dex_number: u16 },
 }
 
 pub struct UnmappedSpeciesDetails<'a> {
-    id_number: u16,
-    names: NameHalves,
-    type1: TypeId,
-    type2: Option<TypeId>,
+    id_number: u32, // triple fusions push this up to u32 until we filter them out
+    type1: &'a str,
+    type2: Option<&'a str>,
     base_stats: BaseStats,
     moves: Box<[LevelMove]>,
     tutor_moves: Box<[MoveId]>,
@@ -55,4 +91,307 @@ pub struct UnmappedSpeciesDetails<'a> {
     abilities: Box<[AbilityId]>,
     hidden_abilities: Box<[AbilityId]>,
     evolutions: Box<[UnmappedEvolution<'a>]>,
+}
+
+impl UnmappedSpeciesDetails<'_> {
+    fn map(
+        dex: IndexMap<Box<str>, Self>,
+        types: &TypeDex,
+        name_map: &NameMap,
+    ) -> Result<IndexMap<Box<str>, SpeciesDetails>, SpeciesMapError> {
+        let all_evos = dex
+            .values()
+            .map(|v| v.map_evos(&dex))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        dex.into_iter()
+            .zip_eq(all_evos)
+            .map(|((key, v), evos)| Ok((key, v.assign_evos(evos, types, name_map)?)))
+            .collect()
+    }
+
+    fn map_evos(
+        &self,
+        dex: &IndexMap<Box<str>, Self>,
+    ) -> Result<Box<[Evolution]>, SpeciesMapError> {
+        self.evolutions
+            .iter()
+            .map(|evo| {
+                let target = evo.target();
+                let (idx, _, _) = dex
+                    .get_full(target)
+                    .context(EvolutionTargetNotFoundSnafu { target })?;
+                Ok(evo.assign_id(SpeciesId::from_usize(idx)))
+            })
+            .collect()
+    }
+
+    fn assign_evos(
+        self,
+        evolutions: Box<[Evolution]>,
+        types: &TypeDex,
+        name_map: &NameMap,
+    ) -> Result<SpeciesDetails, SpeciesMapError> {
+        let id_number = self.id_number as u16;
+        let names = name_map
+            .get_name_halves(id_number)
+            .context(NameNotFoundSnafu {
+                dex_number: id_number,
+            })?
+            .clone();
+
+        let type1 = types.get_id_of(self.type1).context(TypeNotFoundSnafu {
+            type_name: self.type1,
+        })?;
+
+        // turn monotypes into Type1 / None instead of Type1 / Type1
+        let type2 = self
+            .type2
+            .map(|type2| {
+                types
+                    .get_id_of(type2)
+                    .context(TypeNotFoundSnafu { type_name: type2 })
+            })
+            .transpose()?
+            .filter(|&type2| type2 != type1);
+
+        Ok(SpeciesDetails {
+            id_number,
+            names,
+            type1,
+            type2,
+            base_stats: self.base_stats,
+            moves: self.moves,
+            tutor_moves: self.tutor_moves,
+            egg_moves: self.egg_moves,
+            abilities: self.abilities,
+            hidden_abilities: self.hidden_abilities,
+            evolutions,
+        })
+    }
+}
+
+pub struct SpeciesDexDeser<'a> {
+    pub moves: &'a MoveDex,
+    pub items: &'a ItemDex,
+    pub abilities: &'a AbilityDex,
+    pub types: &'a TypeDex,
+    pub name_map: &'a NameMap,
+}
+
+impl<'a, 'de> DeserializeSeed<'de> for SpeciesDexDeser<'a> {
+    type Value = SpeciesDex;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(self)
+    }
+}
+
+impl<'a, 'de> Visitor<'de> for SpeciesDexDeser<'a> {
+    type Value = SpeciesDex;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("species.dat (a ruby hash)")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        let mut unmapped = IndexMap::new();
+
+        while let Some(key) = map.next_key::<MixedKeyRef>()? {
+            match key {
+                MixedKeyRef::Int(_) => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+                MixedKeyRef::Str(sym) => {
+                    if let Some(details) = map.next_value_seed(UnmappedSpeciesDetailsDeser {
+                        moves: self.moves,
+                        items: self.items,
+                        abilities: self.abilities,
+                    })? {
+                        unmapped.insert(Box::from(sym), details);
+                    }
+                }
+            }
+        }
+
+        let map = UnmappedSpeciesDetails::map(unmapped, self.types, self.name_map)
+            .map_err(serde::de::Error::custom)?;
+
+        Ok(SpeciesDex { map })
+    }
+}
+
+struct UnmappedSpeciesDetailsDeser<'a> {
+    moves: &'a MoveDex,
+    items: &'a ItemDex,
+    abilities: &'a AbilityDex,
+}
+
+impl<'a, 'de> DeserializeSeed<'de> for UnmappedSpeciesDetailsDeser<'a> {
+    type Value = Option<UnmappedSpeciesDetails<'de>>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(self)
+    }
+}
+
+impl<'a, 'de> Visitor<'de> for UnmappedSpeciesDetailsDeser<'a> {
+    type Value = Option<UnmappedSpeciesDetails<'de>>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("a species.dat entry")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        let mut id_number = None;
+        let mut type1 = None;
+        let mut type2 = None;
+        let mut base_stats = None;
+        let mut moves = None;
+        let mut tutor_moves = None;
+        let mut egg_moves = None;
+        let mut abilities = None;
+        let mut hidden_abilities = None;
+        let mut evolutions = None;
+
+        // have we already confirmed we can throw this species' details away?
+        let mut discard = false;
+
+        while let Some(key) = map.next_key::<&str>()? {
+            if discard {
+                map.next_value::<IgnoredAny>()?;
+                continue;
+            }
+
+            match key {
+                "@id_number" => {
+                    let n = map.next_value::<u32>()?;
+                    discard = n >= u32::from(u16::MAX);
+                    id_number = Some(n);
+                }
+                "@type1" => type1 = Some(map.next_value::<&str>()?),
+                "@type2" => type2 = Some(map.next_value::<&str>()?),
+                "@base_stats" => base_stats = Some(map.next_value::<BaseStats>()?),
+                "@moves" => {
+                    moves = Some(map.next_value_seed(BoxCollector(LevelMoveVisitor(self.moves)))?)
+                }
+                "@tutor_moves" => {
+                    tutor_moves =
+                        Some(map.next_value_seed(BoxCollector(DexIdKeyVisitor(self.moves)))?)
+                }
+                "@egg_moves" => {
+                    egg_moves =
+                        Some(map.next_value_seed(BoxCollector(DexIdKeyVisitor(self.moves)))?)
+                }
+                "@abilities" => {
+                    abilities =
+                        Some(map.next_value_seed(BoxCollector(DexIdKeyVisitor(self.abilities)))?)
+                }
+                "@hidden_abilities" => {
+                    hidden_abilities =
+                        Some(map.next_value_seed(BoxCollector(DexIdKeyVisitor(self.abilities)))?)
+                }
+                "@evolutions" => {
+                    evolutions = Some(map.next_value_seed(BoxCollector(EvolutionVisitor {
+                        move_dex: self.moves,
+                        item_dex: self.items,
+                    }))?)
+                }
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+
+        if discard {
+            return Ok(None);
+        }
+
+        let missing_field =
+            |field: &'static str| <A::Error as serde::de::Error>::missing_field(field);
+
+        Ok(Some(UnmappedSpeciesDetails {
+            id_number: id_number.ok_or_else(|| missing_field("@id_number"))?,
+            type1: type1.ok_or_else(|| missing_field("@type1"))?,
+            type2,
+            base_stats: base_stats.ok_or_else(|| missing_field("@base_stats"))?,
+            moves: moves.ok_or_else(|| missing_field("@moves"))?,
+            tutor_moves: tutor_moves.ok_or_else(|| missing_field("@tutor_moves"))?,
+            egg_moves: egg_moves.ok_or_else(|| missing_field("@egg_moves"))?,
+            abilities: abilities.ok_or_else(|| missing_field("@abilities"))?,
+            hidden_abilities: hidden_abilities.ok_or_else(|| missing_field("@hidden_abilities"))?,
+            evolutions: evolutions.ok_or_else(|| missing_field("@evolutions"))?,
+        }))
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test {
+    use reikland::DeserializerConfig;
+    use serde::de::DeserializeSeed;
+
+    use crate::{
+        infinite_fusion::{
+            Dex,
+            abilities::test::load_abilities,
+            items::test::load_items,
+            moves::test::load_moves,
+            species::{SpeciesDex, SpeciesDexDeser},
+            types::test::load_types,
+        },
+        test::infinite_fusion_dir,
+    };
+
+    use super::name_halves::NameMap;
+
+    pub(crate) fn load_species() -> SpeciesDex {
+        let types = load_types();
+        let moves = load_moves();
+        let abilities = load_abilities();
+        let items = load_items();
+        let name_map =
+            NameMap::from_file(infinite_fusion_dir().join(NameMap::relative_path())).unwrap();
+
+        let data = std::fs::read(infinite_fusion_dir().join(SpeciesDex::relative_path())).unwrap();
+        let mut deser =
+            reikland::Deserializer::with_config(&data, DeserializerConfig::opinionated()).unwrap();
+
+        SpeciesDexDeser {
+            moves: &moves,
+            items: &items,
+            abilities: &abilities,
+            types: &types,
+            name_map: &name_map,
+        }
+        .deserialize(&mut deser)
+        .unwrap()
+    }
+
+    #[test]
+    fn deser_species_dat() {
+        let species = load_species();
+        assert!(!species.is_empty());
+
+        let bulbasaur = species.get_by_key("BULBASAUR").expect("BULBASAUR exists");
+        assert!(bulbasaur.type2.is_some());
+        assert!(!bulbasaur.moves.is_empty());
+        assert_eq!(bulbasaur.evolutions.len(), 1);
+        assert!(species.get_id_of("IVYSAUR").is_some());
+
+        // best starter ever btw
+        let turtwig = species.get_by_key("TURTWIG").expect("TURTWIG exists");
+        assert!(turtwig.type2.is_none()); // turtwig should be GRASS / NONE not GRASS / GRASS after our filtering
+    }
 }

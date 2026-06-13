@@ -35,6 +35,10 @@ pub enum FromContentError {
 }
 
 impl NameMap {
+    pub fn relative_path() -> &'static Path {
+        Path::new("Data/Scripts/052_InfiniteFusion/Fusion/SplitNames.rb")
+    }
+
     fn get_idx(&self, fusion_dex_num: u16) -> Option<usize> {
         if fusion_dex_num < 252 {
             Some(fusion_dex_num as usize)
