@@ -1,16 +1,29 @@
-use std::{ops::Deref, path::Path};
+use std::{
+    ops::Deref,
+    path::{Path, PathBuf},
+};
 
 use indexmap::IndexMap;
+use reikland::DeserializerConfig;
 use serde::{Deserialize, Serialize, de::DeserializeSeed};
-use snafu::Snafu;
+use snafu::{ResultExt, Snafu};
 
 use crate::infinite_fusion::{
-    abilities::AbilityDex, encounters::Encounters, items::ItemDex, moves::MoveDex,
-    species::SpeciesDex, types::TypeDex,
+    abilities::AbilityDex,
+    encounters::{Encounters, MapNames},
+    filters::{
+        ability_filter::AbilityFilterIndex, move_filter::MoveFilterIndex, stat_filter::StatIndex,
+        type_filter::TypeFilterIndex,
+    },
+    items::{ItemDex, ItemDexDeser},
+    moves::{MoveDex, MoveDexDeser},
+    species::{SpeciesDex, SpeciesDexDeser, SpeciesId, name_halves::NameMap},
+    types::TypeDex,
 };
 
 pub mod abilities;
 pub mod encounters;
+pub mod filters;
 pub mod items;
 pub mod moves;
 pub mod species;
@@ -26,6 +39,16 @@ pub struct InfiniteFusionDex {
     moves: MoveDex,
     species: SpeciesDex,
     types: TypeDex,
+    stat_index: StatIndex,
+    type_index: TypeFilterIndex,
+    ability_index: AbilityFilterIndex,
+    move_index: MoveFilterIndex,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct FusionId {
+    pub head: SpeciesId,
+    pub body: SpeciesId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, strum::EnumString)]
@@ -35,20 +58,183 @@ pub enum GameVersion {
 }
 
 #[derive(Debug, Snafu)]
-pub enum LoadInfiniteFusionDexError {}
+pub enum LoadInfiniteFusionDexError {
+    #[snafu(display("failed to read game data file {}", path.display()))]
+    ReadFile {
+        source: std::io::Error,
+        path: PathBuf,
+    },
+
+    #[snafu(display("failed to deserialize game data"))]
+    Deserialize {
+        source: reikland::MarshalDeserializeError,
+    },
+
+    #[snafu(display("failed to load the split-names file"))]
+    NameMap {
+        source: species::name_halves::FromFileError,
+    },
+}
 
 impl InfiniteFusionDex {
-    fn from_path<P: AsRef<Path>>(
+    pub fn from_path<P: AsRef<Path>>(
         base_path: P,
         game_version: GameVersion,
     ) -> Result<Self, LoadInfiniteFusionDexError> {
-        todo!()
+        let base = base_path.as_ref();
+
+        let read_dat = |relative: &Path| -> Result<Vec<u8>, LoadInfiniteFusionDexError> {
+            let path = base.join(relative);
+            let bytes = std::fs::read(&path).context(ReadFileSnafu { path })?;
+            Ok(maybe_decrypt(bytes))
+        };
+
+        let types = reikland::from_bytes_with_config::<TypeDex>(
+            &read_dat(TypeDex::relative_path())?,
+            DeserializerConfig::opinionated(),
+        )
+        .context(DeserializeSnafu)?;
+
+        let moves = {
+            let data = read_dat(MoveDex::relative_path())?;
+            let mut de =
+                reikland::Deserializer::with_config(&data, DeserializerConfig::opinionated())
+                    .context(DeserializeSnafu)?;
+            MoveDexDeser(&types)
+                .deserialize(&mut de)
+                .context(DeserializeSnafu)?
+        };
+
+        let abilities = reikland::from_bytes_with_config::<AbilityDex>(
+            &read_dat(AbilityDex::relative_path())?,
+            DeserializerConfig::opinionated(),
+        )
+        .context(DeserializeSnafu)?;
+
+        let items = {
+            let data = read_dat(ItemDex::relative_path())?;
+            let mut de =
+                reikland::Deserializer::with_config(&data, DeserializerConfig::opinionated())
+                    .context(DeserializeSnafu)?;
+            ItemDexDeser(&moves)
+                .deserialize(&mut de)
+                .context(DeserializeSnafu)?
+        };
+
+        let name_map_path = match game_version {
+            GameVersion::Kanto => NameMap::relative_path(),
+            GameVersion::Hoenn => NameMap::relative_path_hoenn(),
+        };
+        let name_map = NameMap::from_file(base.join(name_map_path)).context(NameMapSnafu)?;
+
+        let species = {
+            let data = read_dat(SpeciesDex::relative_path())?;
+            let mut de =
+                reikland::Deserializer::with_config(&data, DeserializerConfig::opinionated())
+                    .context(DeserializeSnafu)?;
+            SpeciesDexDeser {
+                moves: &moves,
+                items: &items,
+                abilities: &abilities,
+                types: &types,
+                name_map: &name_map,
+            }
+            .deserialize(&mut de)
+            .context(DeserializeSnafu)?
+        };
+
+        let map_names =
+            MapNames::from_file(base.join("Data/MapInfos.rxdata")).context(DeserializeSnafu)?;
+        let encounters = Encounters::from_bytes(
+            &read_dat(Path::new("Data/encounters.dat"))?,
+            &species,
+            &map_names,
+        )
+        .context(DeserializeSnafu)?;
+
+        let stat_index = StatIndex::build(&species);
+        let type_index = TypeFilterIndex::build(&species, &types);
+        let ability_index = AbilityFilterIndex::build(&species, &abilities);
+        let move_index = MoveFilterIndex::build(&species, &moves);
+
+        Ok(Self {
+            abilities,
+            encounters,
+            items,
+            moves,
+            species,
+            types,
+            stat_index,
+            type_index,
+            ability_index,
+            move_index,
+        })
     }
+
+    pub fn types(&self) -> &TypeDex {
+        &self.types
+    }
+
+    pub fn moves(&self) -> &MoveDex {
+        &self.moves
+    }
+
+    pub fn abilities(&self) -> &AbilityDex {
+        &self.abilities
+    }
+
+    pub fn items(&self) -> &ItemDex {
+        &self.items
+    }
+
+    pub fn species(&self) -> &SpeciesDex {
+        &self.species
+    }
+
+    pub fn encounters(&self) -> &Encounters {
+        &self.encounters
+    }
+
+    pub fn stat_index(&self) -> &StatIndex {
+        &self.stat_index
+    }
+
+    pub fn type_index(&self) -> &TypeFilterIndex {
+        &self.type_index
+    }
+
+    pub fn ability_index(&self) -> &AbilityFilterIndex {
+        &self.ability_index
+    }
+
+    pub fn move_index(&self) -> &MoveFilterIndex {
+        &self.move_index
+    }
+}
+
+// hoenn XOR-"encrypts" its GameData `.dat` files with a key from `Data/Scripts/001_Technical/000_Encryption.rb`.
+pub(crate) fn maybe_decrypt(mut bytes: Vec<u8>) -> Vec<u8> {
+    // could grab with regex or reverse it in future?
+    const KEY: [u8; 16] = [
+        0x4A, 0x8F, 0x2C, 0xE1, 0x73, 0xB5, 0x96, 0x0D, 0x5E, 0xA2, 0x3F, 0xC7, 0x81, 0x14, 0x6B,
+        0xD9,
+    ];
+
+    if !bytes.starts_with(&[0x04, 0x08]) {
+        for (i, byte) in bytes.iter_mut().enumerate() {
+            *byte ^= KEY[i % KEY.len()];
+        }
+    }
+
+    bytes
 }
 
 pub trait DexId {
     fn from_usize(v: usize) -> Self;
     fn to_usize(self) -> usize;
+
+    fn to_u32(self) -> u32;
+    fn from_u32(v: u32) -> Self;
 }
 
 /// Immutable store of data for Pokemon Infinite Fusion. Any instance of [`Self::Id`] SHOULD always be valid.

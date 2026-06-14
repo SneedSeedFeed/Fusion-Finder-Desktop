@@ -24,20 +24,7 @@ pub(crate) mod test {
             .unwrap()
     }
 
-    // key is in Data/Scripts/001_Technical/000_Encryption.rb
-    // hoenn encrypts their data for some reason
-    pub(crate) fn maybe_decrypt(mut bytes: Vec<u8>) -> Vec<u8> {
-        const KEY: [u8; 16] = [
-            0x4A, 0x8F, 0x2C, 0xE1, 0x73, 0xB5, 0x96, 0x0D, 0x5E, 0xA2, 0x3F, 0xC7, 0x81, 0x14,
-            0x6B, 0xD9,
-        ];
-
-        if !bytes.starts_with(&[0x04, 0x08]) {
-            for (i, byte) in bytes.iter_mut().enumerate() {
-                *byte ^= KEY[i % KEY.len()];
-            }
-        }
-
-        bytes
+    pub(crate) fn maybe_decrypt(bytes: Vec<u8>) -> Vec<u8> {
+        crate::infinite_fusion::maybe_decrypt(bytes)
     }
 }
