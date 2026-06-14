@@ -12,8 +12,8 @@ use crate::infinite_fusion::{
     abilities::AbilityDex,
     encounters::{Encounters, MapNames},
     filters::{
-        ability_filter::AbilityFilterIndex, move_filter::MoveFilterIndex, stat_filter::StatIndex,
-        type_filter::TypeFilterIndex,
+        FilterOptions, SpeciesOption, StatBounds, StatRange, ability_filter::AbilityFilterIndex,
+        move_filter::MoveFilterIndex, named_ids, stat_filter::StatIndex, type_filter::TypeFilterIndex,
     },
     items::{ItemDex, ItemDexDeser},
     moves::{MoveDex, MoveDexDeser},
@@ -197,6 +197,45 @@ impl InfiniteFusionDex {
 
     pub fn stat_index(&self) -> &StatIndex {
         &self.stat_index
+    }
+
+    /// The data the front end loads on open to build its filter controls (names + ids for every dex, plus the stat slider bounds).
+    pub fn filter_options(&self) -> FilterOptions {
+        let min = self.species.min_stats();
+        let max = self.species.max_stats();
+
+        let species = self
+            .species
+            .map()
+            .values()
+            .enumerate()
+            .map(|(i, s)| SpeciesOption {
+                id: SpeciesId::from_usize(i).to_u32(),
+                name: s.name.to_string(),
+                first: s.names.first_half.to_string(),
+                second: s.names.second_half.to_string(),
+            })
+            .collect();
+
+        let mut types = named_ids(&self.types, |t| t.name.to_string());
+        types.retain(|t| t.name != "???");
+
+        FilterOptions {
+            species_count: self.species.len(),
+            species,
+            moves: named_ids(&self.moves, |m| m.name.to_string()),
+            types,
+            abilities: named_ids(&self.abilities, |a| a.name.to_string()),
+            stat_bounds: StatBounds {
+                hp: StatRange { min: min.hp(), max: max.hp() },
+                atk: StatRange { min: min.atk(), max: max.atk() },
+                def: StatRange { min: min.def(), max: max.def() },
+                spa: StatRange { min: min.spa(), max: max.spa() },
+                spd: StatRange { min: min.spd(), max: max.spd() },
+                spe: StatRange { min: min.spe(), max: max.spe() },
+                bst: StatRange { min: self.species.min_bst(), max: self.species.max_bst() },
+            },
+        }
     }
 
     pub fn type_index(&self) -> &TypeFilterIndex {

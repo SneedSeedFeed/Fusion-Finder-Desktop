@@ -116,13 +116,19 @@ pub struct HasMove {
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, Default)]
 pub struct StatRanges {
+    #[serde(default)]
     pub hp: Option<StatRange<u8>>,
+    #[serde(default)]
     pub atk: Option<StatRange<u8>>,
+    #[serde(default)]
     pub def: Option<StatRange<u8>>,
+    #[serde(default)]
     pub spa: Option<StatRange<u8>>,
+    #[serde(default)]
     pub spd: Option<StatRange<u8>>,
+    #[serde(default)]
     pub spe: Option<StatRange<u8>>,
-
+    #[serde(default)]
     pub bst: Option<StatRange<u16>>,
 }
 
@@ -130,6 +136,70 @@ pub struct StatRanges {
 pub struct StatRange<T> {
     pub min: T,
     pub max: T,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+pub enum SortBy {
+    #[default]
+    Default,
+    Hp,
+    Atk,
+    Def,
+    Spa,
+    Spd,
+    Spe,
+    Bst,
+}
+
+/// Everything the front end needs on open to populate its filter controls.
+#[derive(Debug, Clone, Serialize)]
+pub struct FilterOptions {
+    /// a fusion id is `head * species_count + body`; the front end needs this to decode results
+    pub species_count: usize,
+    pub species: Vec<SpeciesOption>,
+    pub moves: Vec<NamedId>,
+    pub types: Vec<NamedId>,
+    pub abilities: Vec<NamedId>,
+    pub stat_bounds: StatBounds,
+}
+
+/// A dex entry's id and its display name.
+#[derive(Debug, Clone, Serialize)]
+pub struct NamedId {
+    pub id: u32,
+    pub name: String,
+}
+
+/// A species' id, its real display name, plus its name halves
+#[derive(Debug, Clone, Serialize)]
+pub struct SpeciesOption {
+    pub id: u32,
+    pub name: String,
+    pub first: String,
+    pub second: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct StatBounds {
+    pub hp: StatRange<u8>,
+    pub atk: StatRange<u8>,
+    pub def: StatRange<u8>,
+    pub spa: StatRange<u8>,
+    pub spd: StatRange<u8>,
+    pub spe: StatRange<u8>,
+    pub bst: StatRange<u16>,
+}
+
+/// `(id, name)` for every entry of a dex, in id order.
+pub(crate) fn named_ids<D: Dex>(dex: &D, name: impl Fn(&D::Item) -> String) -> Vec<NamedId> {
+    dex.map()
+        .values()
+        .enumerate()
+        .map(|(i, item)| NamedId {
+            id: D::Id::from_usize(i).to_u32(),
+            name: name(item),
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -54,11 +54,30 @@ impl Dex for SpeciesDex {
     }
 }
 
+impl SpeciesDex {
+    pub fn min_stats(&self) -> &BaseStats {
+        &self.min_stats
+    }
+
+    pub fn max_stats(&self) -> &BaseStats {
+        &self.max_stats
+    }
+
+    pub fn min_bst(&self) -> u16 {
+        self.min_bst
+    }
+
+    pub fn max_bst(&self) -> u16 {
+        self.max_bst
+    }
+}
+
 dex_id!(SpeciesId, u16);
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SpeciesDetails {
     pub id_number: u16,
+    pub name: Box<str>,
     pub names: NameHalves,
     pub type1: TypeId,
     pub type2: Option<TypeId>,
@@ -86,6 +105,7 @@ pub enum SpeciesMapError {
 
 pub struct UnmappedSpeciesDetails<'a> {
     id_number: u32, // triple fusions push this up to u32 until we filter them out
+    name: &'a str,
     type1: &'a str,
     type2: Option<&'a str>,
     base_stats: BaseStats,
@@ -176,6 +196,7 @@ impl UnmappedSpeciesDetails<'_> {
 
         Ok(SpeciesDetails {
             id_number,
+            name: self.name.into(),
             names,
             type1,
             type2,
@@ -222,10 +243,10 @@ impl<'a, 'de> Visitor<'de> for SpeciesDexDeser<'a> {
     {
         let mut unmapped = IndexMap::new();
 
-        let mut min_stats = BaseStats::MIN;
-        let mut max_stats = BaseStats::MAX;
-        let mut min_bst = u16::MIN;
-        let mut max_bst = u16::MAX;
+        let mut min_stats = BaseStats::MAX;
+        let mut max_stats = BaseStats::MIN;
+        let mut min_bst = u16::MAX;
+        let mut max_bst = u16::MIN;
 
         while let Some(key) = map.next_key::<MixedKeyRef>()? {
             match key {
@@ -291,6 +312,7 @@ impl<'a, 'de> Visitor<'de> for UnmappedSpeciesDetailsDeser<'a> {
         A: serde::de::MapAccess<'de>,
     {
         let mut id_number = None;
+        let mut name = None;
         let mut type1 = None;
         let mut type2 = None;
         let mut base_stats = None;
@@ -317,6 +339,7 @@ impl<'a, 'de> Visitor<'de> for UnmappedSpeciesDetailsDeser<'a> {
                     discard = n >= u32::from(u16::MAX);
                     id_number = Some(n);
                 }
+                "@real_name" => name = Some(map.next_value::<&str>()?),
                 "@type1" => type1 = Some(map.next_value::<&str>()?),
                 "@type2" => type2 = Some(map.next_value::<&str>()?),
                 "@base_stats" => base_stats = Some(map.next_value::<BaseStats>()?),
@@ -360,6 +383,7 @@ impl<'a, 'de> Visitor<'de> for UnmappedSpeciesDetailsDeser<'a> {
 
         Ok(Some(UnmappedSpeciesDetails {
             id_number: id_number.ok_or_else(|| missing_field("@id_number"))?,
+            name: name.ok_or_else(|| missing_field("@real_name"))?,
             type1: type1.ok_or_else(|| missing_field("@type1"))?,
             type2,
             base_stats: base_stats.ok_or_else(|| missing_field("@base_stats"))?,
@@ -434,9 +458,15 @@ pub(crate) mod test {
         for species in [&classic, &hoenn] {
             assert!(!species.is_empty());
 
+            // real bounds, not the extremes the accumulators start from (a swapped
+            // initialisation would leave them pinned at MIN/MAX)
+            assert!(species.min_bst > u16::MIN && species.max_bst < u16::MAX);
             assert!(species.min_bst < species.max_bst);
+            assert_ne!(*species.min_stats(), super::base_stats::BaseStats::MIN);
+            assert_ne!(*species.max_stats(), super::base_stats::BaseStats::MAX);
 
             let bulbasaur = species.get_by_key("BULBASAUR").expect("BULBASAUR exists");
+            assert_eq!(&*bulbasaur.name, "Bulbasaur");
             assert!(bulbasaur.type2.is_some());
             assert!(!bulbasaur.moves.is_empty());
             assert_eq!(bulbasaur.evolutions.len(), 1);
