@@ -1,4 +1,5 @@
 pub mod ability_filter;
+pub mod custom_sprite_filter;
 pub mod move_filter;
 pub mod stat_filter;
 pub mod type_filter;
@@ -36,7 +37,7 @@ pub(crate) fn separable_filter(n: usize, species: &RoaringBitmap) -> RoaringBitm
     result
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Filters {
     #[serde(default)]
     pub has_pokemon: Option<SpeciesId>,
@@ -48,6 +49,13 @@ pub struct Filters {
     pub has_ability: Option<HasAbility>,
     #[serde(default)]
     pub has_move: Option<HasMove>,
+    /// only fusions whose `head.body` has a base custom sprite
+    #[serde(default)]
+    pub has_custom_sprite: bool,
+    /// exclude species whose in-game dex number exceeds this (hidden, game-set: Kanto's data
+    /// carries Gen-3 species it can't actually fuse, so we cap at the real fusable count)
+    #[serde(default)]
+    pub block_ids_above: Option<u16>,
 }
 
 impl Filters {
@@ -57,9 +65,26 @@ impl Filters {
         let n = dex.species().len();
         let mut result = RoaringBitmap::new();
 
+        // species (by index) allowed under the id cap; both head and body must be allowed
+        let allowed: Option<RoaringBitmap> = self.block_ids_above.map(|max| {
+            dex.species()
+                .map()
+                .values()
+                .enumerate()
+                .filter_map(|(i, s)| (s.id_number <= max).then_some(i as u32))
+                .collect()
+        });
+
         for head_id in 0..n {
             let head = SpeciesId::from_usize(head_id);
             let mut bodies: Option<RoaringBitmap> = None;
+
+            if let Some(allowed) = &allowed {
+                if !allowed.contains(head_id as u32) {
+                    continue; // head species is over the cap -> none of its fusions exist
+                }
+                and_in(&mut bodies, allowed.clone());
+            }
 
             // body must be the chosen species (unless the head already is it)
             if let Some(pokemon) = self.has_pokemon
@@ -84,6 +109,12 @@ impl Filters {
                 && let Some(set) = dex.move_index().bodies_for_head(head, has_move)
             {
                 and_in(&mut bodies, set);
+            }
+            if self.has_custom_sprite {
+                and_in(
+                    &mut bodies,
+                    dex.custom_sprite_index().bodies_for_head(head).clone(),
+                );
             }
 
             let row = (head_id * n) as u32;
@@ -141,7 +172,7 @@ pub struct StatRange<T> {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
 pub enum SortBy {
     #[default]
-    Default,
+    DexNumber,
     Hp,
     Atk,
     Def,
@@ -149,6 +180,73 @@ pub enum SortBy {
     Spd,
     Spe,
     Bst,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+pub enum SortOrder {
+    #[default]
+    Ascending,
+    Descending,
+}
+
+impl SortOrder {
+    pub fn is_descending(self) -> bool {
+        self == SortOrder::Descending
+    }
+
+    pub fn is_ascending(self) -> bool {
+        self == SortOrder::Ascending
+    }
+}
+
+impl SortBy {
+    /// Order the matching fusion ids. `DexNumber` uses the fusion id itself; any stat uses the
+    /// *fused* value. `descending` flips the order; ties always fall back to ascending id.
+    pub fn order(
+        self,
+        dex: &InfiniteFusionDex,
+        matches: RoaringBitmap,
+        order: SortOrder,
+    ) -> Vec<u32> {
+        if self == SortBy::DexNumber {
+            // RoaringBitmap iterates ascending
+            let mut ids: Vec<u32> = matches.iter().collect();
+            if order.is_descending() {
+                ids.reverse();
+            }
+            return ids;
+        }
+        let n = dex.species().len() as u32;
+        let mut keyed: Vec<(u16, u32)> = matches
+            .iter()
+            .map(|id| (self.fused_stat(dex, id / n, id % n), id))
+            .collect();
+        keyed.sort_by(|a, b| {
+            let by_stat = if order.is_descending() {
+                b.0.cmp(&a.0)
+            } else {
+                a.0.cmp(&b.0)
+            };
+            by_stat.then(a.1.cmp(&b.1))
+        });
+        keyed.into_iter().map(|(_, id)| id).collect()
+    }
+
+    fn fused_stat(self, dex: &InfiniteFusionDex, head: u32, body: u32) -> u16 {
+        let head = dex.species().get_item(SpeciesId::from_u32(head)).base_stats;
+        let body = dex.species().get_item(SpeciesId::from_u32(body)).base_stats;
+        let fused = head.fuse(&body);
+        match self {
+            SortBy::Hp => fused.hp().into(),
+            SortBy::Atk => fused.atk().into(),
+            SortBy::Def => fused.def().into(),
+            SortBy::Spa => fused.spa().into(),
+            SortBy::Spd => fused.spd().into(),
+            SortBy::Spe => fused.spe().into(),
+            SortBy::Bst => fused.bst(),
+            SortBy::DexNumber => 0,
+        }
+    }
 }
 
 /// Everything the front end needs on open to populate its filter controls.
@@ -161,6 +259,8 @@ pub struct FilterOptions {
     pub types: Vec<NamedId>,
     pub abilities: Vec<NamedId>,
     pub stat_bounds: StatBounds,
+    /// default value for the hidden id-cap filter (`block_ids_above`); `None` = no cap
+    pub block_ids_above: Option<u16>,
 }
 
 /// A dex entry's id and its display name.
@@ -174,6 +274,8 @@ pub struct NamedId {
 #[derive(Debug, Clone, Serialize)]
 pub struct SpeciesOption {
     pub id: u32,
+    /// in-game dex number (`id_number`); used to build sprite URLs, distinct from `id` (our index)
+    pub dex_id: u16,
     pub name: String,
     pub first: String,
     pub second: String,
@@ -207,12 +309,14 @@ mod test {
     use roaring::RoaringBitmap;
 
     use super::{
-        Filters, HasAbility, HasMove, StatRange, StatRanges, ability_filter::AbilitySource,
+        Filters, HasAbility, HasMove, SortBy, StatRange, StatRanges, ability_filter::AbilitySource,
         move_filter::MoveSource, separable_filter, stat_filter::FusedStat,
         stat_filter::StatRange as TaggedRange,
     };
     use crate::{
-        infinite_fusion::{Dex, DexId, GameVersion, InfiniteFusionDex},
+        infinite_fusion::{
+            Dex, DexId, GameVersion, InfiniteFusionDex, filters::SortOrder, species::SpeciesId,
+        },
         test::infinite_fusion_dir,
     };
 
@@ -240,6 +344,8 @@ mod test {
                 tutor: false,
                 moves: [tackle].into(),
             }),
+            has_custom_sprite: false,
+            block_ids_above: None,
         };
 
         let naive = dex.stat_index().filter(&[
@@ -266,6 +372,8 @@ mod test {
             stat_range: StatRanges::default(),
             has_ability: None,
             has_move: None,
+            has_custom_sprite: false,
+            block_ids_above: None,
         };
 
         let mut only = RoaringBitmap::new();
@@ -275,5 +383,100 @@ mod test {
         let optimised = filters.apply(&dex);
         assert!(!optimised.is_empty());
         assert_eq!(optimised, naive);
+    }
+
+    #[test]
+    fn block_ids_above_caps_both_components() {
+        let dex = InfiniteFusionDex::from_path(infinite_fusion_dir(), GameVersion::Kanto).unwrap();
+        let allowed = dex
+            .species()
+            .map()
+            .values()
+            .filter(|s| s.id_number <= 501)
+            .count();
+        // Kanto carries Gen-3 species (id > 501) it can't fuse
+        assert!(
+            allowed < dex.species().len(),
+            "expected some capped species"
+        );
+
+        let result = Filters {
+            block_ids_above: Some(501),
+            ..Default::default()
+        }
+        .apply(&dex);
+
+        // exactly the allowed×allowed grid — neither head nor body may exceed the cap
+        assert_eq!(result.len() as usize, allowed * allowed);
+    }
+
+    #[test]
+    fn has_custom_sprite_is_a_strict_non_empty_subset() {
+        let dex = InfiniteFusionDex::from_path(infinite_fusion_dir(), GameVersion::Kanto).unwrap();
+        let n = dex.species().len() as u32;
+
+        let all = Filters::default().apply(&dex);
+        let custom = Filters {
+            has_custom_sprite: true,
+            ..Default::default()
+        }
+        .apply(&dex);
+
+        assert!(!custom.is_empty());
+        assert!(custom.len() < all.len());
+        assert!(custom.is_subset(&all));
+
+        // bulbasaur(head) + charmander(body) is a hand-drawn sprite (manifest has `1.4.png`)
+        let bulbasaur = dex.species().get_id_of("BULBASAUR").unwrap();
+        let charmander = dex.species().get_id_of("CHARMANDER").unwrap();
+        assert!(custom.contains(bulbasaur.to_u32() * n + charmander.to_u32()));
+    }
+
+    #[test]
+    fn sort_by_stat_is_descending_and_lossless() {
+        let dex = InfiniteFusionDex::from_path(infinite_fusion_dir(), GameVersion::Kanto).unwrap();
+        let n = dex.species().len() as u32;
+        let bulbasaur = dex.species().get_id_of("BULBASAUR").unwrap();
+
+        let matches = Filters {
+            has_pokemon: Some(bulbasaur),
+            ..Default::default()
+        }
+        .apply(&dex);
+
+        let ordered = SortBy::Bst.order(&dex, matches.clone(), SortOrder::Descending);
+        // same set, just reordered
+        assert_eq!(ordered.len(), matches.len() as usize);
+        assert_eq!(ordered.iter().copied().collect::<RoaringBitmap>(), matches);
+
+        let bst = |id: u32| {
+            let head = dex
+                .species()
+                .get_item(SpeciesId::from_u32(id / n))
+                .base_stats;
+            let body = dex
+                .species()
+                .get_item(SpeciesId::from_u32(id % n))
+                .base_stats;
+            head.fuse(&body).bst()
+        };
+        // descending: non-increasing fused BST
+        assert!(ordered.windows(2).all(|w| bst(w[0]) >= bst(w[1])));
+        // ascending: non-decreasing fused BST
+        let asc = SortBy::Bst.order(&dex, matches.clone(), SortOrder::Ascending);
+        assert!(asc.windows(2).all(|w| bst(w[0]) <= bst(w[1])));
+        // DexNumber: ascending vs descending id order
+        assert!(
+            SortBy::DexNumber
+                .order(&dex, matches.clone(), SortOrder::Ascending)
+                .windows(2)
+                .all(|w| w[0] < w[1])
+        );
+        assert!(
+            SortBy::DexNumber
+                .order(&dex, matches, SortOrder::Descending)
+                .windows(2)
+                .all(|w| w[0] > w[1])
+        );
     }
 }

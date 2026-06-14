@@ -1,14 +1,32 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { invoke } from "@tauri-apps/api/core";
+  import { invoke, convertFileSrc } from "@tauri-apps/api/core";
   import RangeSlider from "$lib/RangeSlider.svelte";
   import Combobox from "$lib/Combobox.svelte";
 
-  interface NamedId { id: number; name: string }
-  interface SpeciesOption { id: number; name: string; first: string; second: string }
-  interface Range { min: number; max: number }
+  interface NamedId {
+    id: number;
+    name: string;
+  }
+  interface SpeciesOption {
+    id: number;
+    dex_id: number;
+    name: string;
+    first: string;
+    second: string;
+  }
+  interface Range {
+    min: number;
+    max: number;
+  }
   interface StatBounds {
-    hp: Range; atk: Range; def: Range; spa: Range; spd: Range; spe: Range; bst: Range;
+    hp: Range;
+    atk: Range;
+    def: Range;
+    spa: Range;
+    spd: Range;
+    spe: Range;
+    bst: Range;
   }
   interface FilterOptions {
     species_count: number;
@@ -17,10 +35,24 @@
     types: NamedId[];
     abilities: NamedId[];
     stat_bounds: StatBounds;
+    block_ids_above: number | null;
   }
 
   const STATS = ["hp", "atk", "def", "spa", "spd", "spe", "bst"] as const;
   type StatKey = (typeof STATS)[number];
+
+  // matches the backend SortBy enum (variant names)
+  const SORTS = [
+    { value: "DexNumber", label: "Dex order" },
+    { value: "Bst", label: "BST" },
+    { value: "Hp", label: "HP" },
+    { value: "Atk", label: "Attack" },
+    { value: "Def", label: "Defense" },
+    { value: "Spa", label: "Sp. Atk" },
+    { value: "Spd", label: "Sp. Def" },
+    { value: "Spe", label: "Speed" },
+  ] as const;
+  type SortBy = (typeof SORTS)[number]["value"];
 
   let options = $state<FilterOptions | null>(null);
   let error = $state<string | null>(null);
@@ -36,9 +68,25 @@
   let moveEgg = $state(false);
   let moveLevel = $state(true);
   let moveTutor = $state(false);
+  let hasCustomSprite = $state(false);
+  let sortBy = $state<SortBy>("DexNumber");
+  let sortDesc = $state(false);
+  // hidden, game-set: caps fusable species to the real dex (Kanto's data has unfusable Gen-3 mons)
+  let blockIdsAbove = $state<number | null>(null);
+
+  // species available to pick — honours the hidden id cap so capped (e.g. Gen-3) mons aren't offered
+  const pickableSpecies = $derived(
+    options
+      ? blockIdsAbove === null
+        ? options.species
+        : options.species.filter((s) => s.dex_id <= blockIdsAbove!)
+      : [],
+  );
   // per-stat slider position as [min, max]; a stat only constrains the search when its
   // range is narrower than the full bounds (otherwise we send None for it).
-  let statRange = $state<Record<StatKey, [number, number]>>({} as Record<StatKey, [number, number]>);
+  let statRange = $state<Record<StatKey, [number, number]>>(
+    {} as Record<StatKey, [number, number]>,
+  );
 
   function speciesName(id: number): string {
     return options?.species[id]?.name ?? `#${id}`;
@@ -49,6 +97,15 @@
     const h = options?.species[head];
     const b = options?.species[body];
     return h && b ? h.first + b.second : "";
+  }
+
+  // backend serves the sprite at fusionsprite://…/{headDex}.{bodyDex}.png (dex ids, not our indices)
+  function spriteUrl(head: number, body: number): string {
+    const h = options?.species[head]?.dex_id;
+    const b = options?.species[body]?.dex_id;
+    return h != null && b != null
+      ? convertFileSrc(`${h}.${b}.png`, "fusionsprite")
+      : "";
   }
 
   function decode(id: number): { head: number; body: number } {
@@ -70,8 +127,15 @@
     if (selectedTypes.length) filters.has_type = selectedTypes;
     if (abilityId !== null) filters.has_ability = { [abilitySlot]: abilityId };
     if (moveIds.length) {
-      filters.has_move = { egg: moveEgg, level: moveLevel, tutor: moveTutor, moves: moveIds };
+      filters.has_move = {
+        egg: moveEgg,
+        level: moveLevel,
+        tutor: moveTutor,
+        moves: moveIds,
+      };
     }
+    if (hasCustomSprite) filters.has_custom_sprite = true;
+    if (blockIdsAbove !== null) filters.block_ids_above = blockIdsAbove;
     if (options) {
       // a stat is active only if its slider has moved off the full bounds; send the whole
       // object (active stats as {min,max}, the rest as null) so the backend leaves them open.
@@ -89,10 +153,14 @@
     return filters;
   }
 
-  async function runSearch(filters: Record<string, unknown>) {
+  async function runSearch(
+    filters: Record<string, unknown>,
+    sort: SortBy,
+    descending: boolean,
+  ) {
     searching = true;
     try {
-      results = await invoke<number[]>("search", { filters });
+      results = await invoke<number[]>("search", { filters, sort, descending });
       scrollTop = 0;
       scroller?.scrollTo({ top: 0 });
     } catch (e) {
@@ -105,6 +173,7 @@
   onMount(async () => {
     try {
       options = await invoke<FilterOptions>("bootstrap");
+      blockIdsAbove = options.block_ids_above;
       for (const s of STATS) {
         statRange[s] = [options.stat_bounds[s].min, options.stat_bounds[s].max];
       }
@@ -117,7 +186,9 @@
   $effect(() => {
     if (!options) return;
     const filters = buildFilters(); // reads filter state -> registers deps
-    const handle = setTimeout(() => runSearch(filters), 200);
+    const sort = sortBy;
+    const desc = sortDesc;
+    const handle = setTimeout(() => runSearch(filters, sort, desc), 200);
     return () => clearTimeout(handle);
   });
 
@@ -132,14 +203,20 @@
   let viewportW = $state(0);
   let viewportH = $state(0);
 
-  const cols = $derived(Math.max(1, Math.floor((viewportW + GAP) / (COL_W + GAP))));
+  const cols = $derived(
+    Math.max(1, Math.floor((viewportW + GAP) / (COL_W + GAP))),
+  );
   const rowStride = ROW_H + GAP;
   const totalRows = $derived(Math.ceil(results.length / cols));
   const totalHeight = $derived(totalRows * rowStride);
-  const firstRow = $derived(Math.max(0, Math.floor(scrollTop / rowStride) - OVERSCAN));
+  const firstRow = $derived(
+    Math.max(0, Math.floor(scrollTop / rowStride) - OVERSCAN),
+  );
   const visibleRows = $derived(Math.ceil(viewportH / rowStride) + 2 * OVERSCAN);
   const start = $derived(firstRow * cols);
-  const end = $derived(Math.min(results.length, (firstRow + visibleRows) * cols));
+  const end = $derived(
+    Math.min(results.length, (firstRow + visibleRows) * cols),
+  );
   const offsetY = $derived(firstRow * rowStride);
   const visible = $derived(results.slice(start, end));
 </script>
@@ -151,9 +228,29 @@
     <p class="p-4 text-gray-500">Loading game data…</p>
   {:else}
     <section class="flex min-w-0 flex-1 flex-col">
-      <header class="flex items-center gap-2 border-b border-gray-200 px-3 py-2">
+      <header
+        class="flex items-center gap-2 border-b border-gray-200 px-3 py-2"
+      >
         <strong>{results.length.toLocaleString()}</strong> fusions
         {#if searching}<span class="text-gray-400">· searching…</span>{/if}
+        <label class="ml-auto flex items-center gap-1 text-xs text-gray-500">
+          Sort
+          <select
+            class="rounded border border-gray-300 p-1 text-gray-800"
+            bind:value={sortBy}
+          >
+            {#each SORTS as s (s.value)}<option value={s.value}
+                >{s.label}</option
+              >{/each}
+          </select>
+        </label>
+        <button
+          type="button"
+          class="rounded border border-gray-300 px-2 py-1 text-gray-800"
+          title={sortDesc ? "Descending" : "Ascending"}
+          aria-label={sortDesc ? "Descending" : "Ascending"}
+          onclick={() => (sortDesc = !sortDesc)}>{sortDesc ? "↓" : "↑"}</button
+        >
       </header>
 
       <div
@@ -175,9 +272,26 @@
                 style="height: {ROW_H}px"
                 title={`${speciesName(f.head)} / ${speciesName(f.body)}`}
               >
-                <div class="mb-1 size-24 shrink-0 rounded border border-dashed border-gray-300 bg-gray-100" aria-hidden="true"></div>
-                <span class="w-full truncate font-semibold">{fusionName(f.head, f.body)}</span>
-                <span class="w-full truncate text-[0.65rem] text-gray-500">{speciesName(f.head)} / {speciesName(f.body)}</span>
+                <div
+                  class="mb-1 size-24 shrink-0 overflow-hidden rounded bg-gray-50"
+                >
+                  <img
+                    src={spriteUrl(f.head, f.body)}
+                    alt=""
+                    loading="lazy"
+                    decoding="async"
+                    class="size-24 [image-rendering:pixelated]"
+                    onerror={(e) =>
+                      ((e.currentTarget as HTMLImageElement).style.visibility =
+                        "hidden")}
+                  />
+                </div>
+                <span class="w-full truncate font-semibold"
+                  >{fusionName(f.head, f.body)}</span
+                >
+                <span class="w-full truncate text-[0.65rem] text-gray-500"
+                  >{speciesName(f.head)} / {speciesName(f.body)}</span
+                >
               </div>
             {/each}
           </div>
@@ -188,16 +302,27 @@
     <aside class="w-80 shrink-0 overflow-auto border-l border-gray-200 p-3">
       <h2 class="mb-2 text-base font-semibold">Filters</h2>
 
+      <label class="mb-3 flex items-center gap-2 text-sm">
+        <input type="checkbox" bind:checked={hasCustomSprite} />
+        Only fusions with a custom sprite
+      </label>
+
       <fieldset class="mb-3 rounded-md border border-gray-200 p-2">
-        <legend class="px-1 text-sm font-semibold">Types <span class="font-normal text-gray-400">(up to 2)</span></legend>
+        <legend class="px-1 text-sm font-semibold"
+          >Types <span class="font-normal text-gray-400">(up to 2)</span
+          ></legend
+        >
         <div class="flex flex-wrap gap-1">
           {#each options.types as t (t.id)}
             <button
               type="button"
-              class="rounded-full border px-2 py-0.5 text-xs {selectedTypes.includes(t.id)
+              class="rounded-full border px-2 py-0.5 text-xs {selectedTypes.includes(
+                t.id,
+              )
                 ? 'border-blue-600 bg-blue-600 text-white'
                 : 'border-gray-300 bg-white'}"
-              onclick={() => toggleType(t.id)}>{t.name}</button>
+              onclick={() => toggleType(t.id)}>{t.name}</button
+            >
           {/each}
         </div>
       </fieldset>
@@ -209,8 +334,13 @@
           {@const active = statRange[s][0] > b.min || statRange[s][1] < b.max}
           <div class="mb-3">
             <div class="mb-1 flex items-center justify-between text-xs">
-              <span class="font-medium {active ? 'text-blue-700' : 'text-gray-500'}">{s.toUpperCase()}</span>
-              <span class="tabular-nums text-gray-500">{statRange[s][0]} – {statRange[s][1]}</span>
+              <span
+                class="font-medium {active ? 'text-blue-700' : 'text-gray-500'}"
+                >{s.toUpperCase()}</span
+              >
+              <span class="tabular-nums text-gray-500"
+                >{statRange[s][0]} – {statRange[s][1]}</span
+              >
             </div>
             <RangeSlider min={b.min} max={b.max} bind:value={statRange[s]} />
           </div>
@@ -219,13 +349,19 @@
 
       <fieldset class="mb-3 rounded-md border border-gray-200 p-2">
         <legend class="px-1 text-sm font-semibold">Contains Pokémon</legend>
-        <Combobox items={options.species} bind:value={hasPokemon} />
+        <Combobox items={pickableSpecies} bind:value={hasPokemon} />
       </fieldset>
 
       <fieldset class="mb-3 rounded-md border border-gray-200 p-2">
         <legend class="px-1 text-sm font-semibold">Ability</legend>
-        <div class="mb-1"><Combobox items={options.abilities} bind:value={abilityId} /></div>
-        <select class="w-full rounded border border-gray-300 p-1 disabled:opacity-50" bind:value={abilitySlot} disabled={abilityId === null}>
+        <div class="mb-1">
+          <Combobox items={options.abilities} bind:value={abilityId} />
+        </div>
+        <select
+          class="w-full rounded border border-gray-300 p-1 disabled:opacity-50"
+          bind:value={abilitySlot}
+          disabled={abilityId === null}
+        >
           <option value="Either">either slot</option>
           <option value="Normal">normal</option>
           <option value="Hidden">hidden</option>
@@ -233,14 +369,29 @@
       </fieldset>
 
       <fieldset class="mb-3 rounded-md border border-gray-200 p-2">
-        <legend class="px-1 text-sm font-semibold">Moves <span class="font-normal text-gray-400">(learns all)</span></legend>
-        <select class="w-full rounded border border-gray-300 p-1" multiple size="6" bind:value={moveIds}>
-          {#each options.moves as m (m.id)}<option value={m.id}>{m.name}</option>{/each}
+        <legend class="px-1 text-sm font-semibold"
+          >Moves <span class="font-normal text-gray-400">(learns all)</span
+          ></legend
+        >
+        <select
+          class="w-full rounded border border-gray-300 p-1"
+          multiple
+          size="6"
+          bind:value={moveIds}
+        >
+          {#each options.moves as m (m.id)}<option value={m.id}>{m.name}</option
+            >{/each}
         </select>
         <div class="mt-1 flex gap-3 text-xs">
-          <label class="flex items-center gap-1"><input type="checkbox" bind:checked={moveLevel} /> level</label>
-          <label class="flex items-center gap-1"><input type="checkbox" bind:checked={moveTutor} /> tutor</label>
-          <label class="flex items-center gap-1"><input type="checkbox" bind:checked={moveEgg} /> egg</label>
+          <label class="flex items-center gap-1"
+            ><input type="checkbox" bind:checked={moveLevel} /> level</label
+          >
+          <label class="flex items-center gap-1"
+            ><input type="checkbox" bind:checked={moveTutor} /> tutor</label
+          >
+          <label class="flex items-center gap-1"
+            ><input type="checkbox" bind:checked={moveEgg} /> egg</label
+          >
         </div>
       </fieldset>
     </aside>

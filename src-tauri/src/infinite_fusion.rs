@@ -13,7 +13,8 @@ use crate::infinite_fusion::{
     encounters::{Encounters, MapNames},
     filters::{
         FilterOptions, SpeciesOption, StatBounds, StatRange, ability_filter::AbilityFilterIndex,
-        move_filter::MoveFilterIndex, named_ids, stat_filter::StatIndex, type_filter::TypeFilterIndex,
+        custom_sprite_filter::CustomSpriteIndex, move_filter::MoveFilterIndex, named_ids,
+        stat_filter::StatIndex, type_filter::TypeFilterIndex,
     },
     items::{ItemDex, ItemDexDeser},
     moves::{MoveDex, MoveDexDeser},
@@ -43,6 +44,10 @@ pub struct InfiniteFusionDex {
     type_index: TypeFilterIndex,
     ability_index: AbilityFilterIndex,
     move_index: MoveFilterIndex,
+    custom_sprite_index: CustomSpriteIndex,
+    /// highest in-game dex number this game can actually fuse (`None` = no cap); feeds the hidden
+    /// `block_ids_above` filter
+    max_fusable_id: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -55,6 +60,17 @@ pub struct FusionId {
 pub enum GameVersion {
     Kanto,
     Hoenn,
+}
+
+impl GameVersion {
+    // kanto species.dat contains species not actually in Kanto
+    /// Highest in-game dex number actually fusable in this game
+    pub fn max_fusable_id(self) -> Option<u16> {
+        match self {
+            GameVersion::Kanto => Some(501),
+            GameVersion::Hoenn => None,
+        }
+    }
 }
 
 #[derive(Debug, Snafu)]
@@ -156,6 +172,8 @@ impl InfiniteFusionDex {
         let type_index = TypeFilterIndex::build(&species, &types);
         let ability_index = AbilityFilterIndex::build(&species, &abilities);
         let move_index = MoveFilterIndex::build(&species, &moves);
+        let custom_sprite_index =
+            CustomSpriteIndex::build(&species, &base.join("Data/sprites/CUSTOM_SPRITES"));
 
         Ok(Self {
             abilities,
@@ -168,6 +186,8 @@ impl InfiniteFusionDex {
             type_index,
             ability_index,
             move_index,
+            custom_sprite_index,
+            max_fusable_id: game_version.max_fusable_id(),
         })
     }
 
@@ -211,6 +231,7 @@ impl InfiniteFusionDex {
             .enumerate()
             .map(|(i, s)| SpeciesOption {
                 id: SpeciesId::from_usize(i).to_u32(),
+                dex_id: s.id_number,
                 name: s.name.to_string(),
                 first: s.names.first_half.to_string(),
                 second: s.names.second_half.to_string(),
@@ -226,6 +247,7 @@ impl InfiniteFusionDex {
             moves: named_ids(&self.moves, |m| m.name.to_string()),
             types,
             abilities: named_ids(&self.abilities, |a| a.name.to_string()),
+            block_ids_above: self.max_fusable_id,
             stat_bounds: StatBounds {
                 hp: StatRange { min: min.hp(), max: max.hp() },
                 atk: StatRange { min: min.atk(), max: max.atk() },
@@ -248,6 +270,10 @@ impl InfiniteFusionDex {
 
     pub fn move_index(&self) -> &MoveFilterIndex {
         &self.move_index
+    }
+
+    pub fn custom_sprite_index(&self) -> &CustomSpriteIndex {
+        &self.custom_sprite_index
     }
 }
 
