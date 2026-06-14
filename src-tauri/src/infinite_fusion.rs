@@ -249,13 +249,34 @@ impl InfiniteFusionDex {
             abilities: named_ids(&self.abilities, |a| a.name.to_string()),
             block_ids_above: self.max_fusable_id,
             stat_bounds: StatBounds {
-                hp: StatRange { min: min.hp(), max: max.hp() },
-                atk: StatRange { min: min.atk(), max: max.atk() },
-                def: StatRange { min: min.def(), max: max.def() },
-                spa: StatRange { min: min.spa(), max: max.spa() },
-                spd: StatRange { min: min.spd(), max: max.spd() },
-                spe: StatRange { min: min.spe(), max: max.spe() },
-                bst: StatRange { min: self.species.min_bst(), max: self.species.max_bst() },
+                hp: StatRange {
+                    min: min.hp(),
+                    max: max.hp(),
+                },
+                atk: StatRange {
+                    min: min.atk(),
+                    max: max.atk(),
+                },
+                def: StatRange {
+                    min: min.def(),
+                    max: max.def(),
+                },
+                spa: StatRange {
+                    min: min.spa(),
+                    max: max.spa(),
+                },
+                spd: StatRange {
+                    min: min.spd(),
+                    max: max.spd(),
+                },
+                spe: StatRange {
+                    min: min.spe(),
+                    max: max.spe(),
+                },
+                bst: StatRange {
+                    min: self.species.min_bst(),
+                    max: self.species.max_bst(),
+                },
             },
         }
     }
