@@ -71,5 +71,5 @@ impl BaseStats {
 }
 
 fn fuse_calc(dominant: u8, other: u8) -> u8 {
-    (((dominant as f32 * 2.0) / 3.0) + (other as f32 / 3.0)).floor() as u8
+    (2 * u16::from(dominant) / 3 + u16::from(other) / 3) as u8
 }
