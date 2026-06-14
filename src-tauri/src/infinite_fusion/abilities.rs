@@ -9,6 +9,7 @@ use serde::{
 
 use crate::{dex_id, infinite_fusion::Dex};
 
+#[derive(Debug, Clone)]
 pub struct AbilityDex {
     map: IndexMap<Box<str>, AbilityDetails>,
 }

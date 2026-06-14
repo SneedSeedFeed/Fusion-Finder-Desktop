@@ -1,7 +1,13 @@
 use std::{ops::Deref, path::Path};
 
 use indexmap::IndexMap;
-use serde::{Deserialize, de::DeserializeSeed};
+use serde::{Deserialize, Serialize, de::DeserializeSeed};
+use snafu::Snafu;
+
+use crate::infinite_fusion::{
+    abilities::AbilityDex, encounters::Encounters, items::ItemDex, moves::MoveDex,
+    species::SpeciesDex, types::TypeDex,
+};
 
 pub mod abilities;
 pub mod encounters;
@@ -9,6 +15,36 @@ pub mod items;
 pub mod moves;
 pub mod species;
 pub mod types;
+
+// maybe just Box::leak this whole thing since the core data is immutable and it's going to get shared between threads??
+/// All data across every fusion. big old type since it's multiple indexmaps so ideally get some pointer around it
+#[derive(Debug, Clone)]
+pub struct InfiniteFusionDex {
+    abilities: AbilityDex,
+    encounters: Encounters,
+    items: ItemDex,
+    moves: MoveDex,
+    species: SpeciesDex,
+    types: TypeDex,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, strum::EnumString)]
+pub enum GameVersion {
+    Kanto,
+    Hoenn,
+}
+
+#[derive(Debug, Snafu)]
+pub enum LoadInfiniteFusionDexError {}
+
+impl InfiniteFusionDex {
+    fn from_path<P: AsRef<Path>>(
+        base_path: P,
+        game_version: GameVersion,
+    ) -> Result<Self, LoadInfiniteFusionDexError> {
+        todo!()
+    }
+}
 
 pub trait DexId {
     fn from_usize(v: usize) -> Self;

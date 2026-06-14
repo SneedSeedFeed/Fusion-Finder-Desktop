@@ -94,6 +94,7 @@ pub struct TypeDetails {
 
 dex_id!(TypeId, u8);
 
+#[derive(Debug, Clone)]
 pub struct TypeDex {
     // id of normal and flying types are tracked explicitly for use in fusion type checking
     flying_id: TypeId,
