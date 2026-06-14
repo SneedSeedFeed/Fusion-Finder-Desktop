@@ -6,9 +6,25 @@ macro_rules! create_base_stats {
         }
 
         impl $name {
+            pub const MIN: $name = $name {
+                $($stat: u8::MIN),*
+            };
+
+            pub const MAX: $name = $name {
+                $($stat: u8::MAX),*
+            };
+
             $(pub fn $stat(&self) -> u8 {
                 self.$stat
             })*
+
+            pub fn apply_min(&mut self, other: &Self) {
+                $(self.$stat = self.$stat.min(other.$stat);)*
+            }
+
+            pub fn apply_max(&mut self, other: &Self) {
+                $(self.$stat = self.$stat.max(other.$stat);)*
+            }
         }
     };
 }

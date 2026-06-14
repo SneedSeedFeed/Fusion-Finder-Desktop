@@ -34,6 +34,10 @@ pub mod name_halves;
 #[derive(Debug, Clone)]
 pub struct SpeciesDex {
     map: IndexMap<Box<str>, SpeciesDetails>,
+    min_stats: BaseStats,
+    max_stats: BaseStats,
+    min_bst: u16,
+    max_bst: u16,
 }
 
 impl Dex for SpeciesDex {
@@ -218,6 +222,11 @@ impl<'a, 'de> Visitor<'de> for SpeciesDexDeser<'a> {
     {
         let mut unmapped = IndexMap::new();
 
+        let mut min_stats = BaseStats::MIN;
+        let mut max_stats = BaseStats::MAX;
+        let mut min_bst = u16::MIN;
+        let mut max_bst = u16::MAX;
+
         while let Some(key) = map.next_key::<MixedKeyRef>()? {
             match key {
                 MixedKeyRef::Int(_) => {
@@ -229,6 +238,11 @@ impl<'a, 'de> Visitor<'de> for SpeciesDexDeser<'a> {
                         items: self.items,
                         abilities: self.abilities,
                     })? {
+                        min_stats.apply_min(&details.base_stats);
+                        max_stats.apply_max(&details.base_stats);
+                        let bst = details.base_stats.bst();
+                        min_bst = min_bst.min(bst);
+                        max_bst = max_bst.max(bst);
                         unmapped.insert(Box::from(sym), details);
                     }
                 }
@@ -238,7 +252,13 @@ impl<'a, 'de> Visitor<'de> for SpeciesDexDeser<'a> {
         let map = UnmappedSpeciesDetails::map(unmapped, self.types, self.name_map)
             .map_err(serde::de::Error::custom)?;
 
-        Ok(SpeciesDex { map })
+        Ok(SpeciesDex {
+            map,
+            min_bst,
+            max_bst,
+            max_stats,
+            min_stats,
+        })
     }
 }
 
@@ -413,6 +433,8 @@ pub(crate) mod test {
 
         for species in [&classic, &hoenn] {
             assert!(!species.is_empty());
+
+            assert!(species.min_bst < species.max_bst);
 
             let bulbasaur = species.get_by_key("BULBASAUR").expect("BULBASAUR exists");
             assert!(bulbasaur.type2.is_some());
