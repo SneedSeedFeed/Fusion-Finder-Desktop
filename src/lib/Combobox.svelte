@@ -9,7 +9,7 @@
 
   let {
     items,
-    placeholder = "— any —",
+    placeholder = "-- any --",
     value = $bindable(),
   }: { items: Item[]; placeholder?: string; value?: number | null } = $props();
 
@@ -48,27 +48,32 @@
   <input
     use:melt={$input}
     {placeholder}
-    class="w-full rounded border border-gray-300 p-1 pr-6"
+    oninput={(e) => {
+      // emptying the field clears the selection (fires only on real typing, not on picking)
+      if ((e.currentTarget as HTMLInputElement).value === "") clear();
+    }}
+    class="w-full rounded border border-gray-700 bg-gray-800 p-1 pr-6 text-gray-200 placeholder:text-gray-500"
   />
   {#if value !== null && value !== undefined}
     <button
       type="button"
       onclick={clear}
       aria-label="clear"
-      class="absolute top-1/2 right-1 -translate-y-1/2 px-1 text-gray-400 hover:text-gray-700"
-    >×</button>
+      class="absolute top-1/2 right-1 -translate-y-1/2 px-1 text-gray-400 hover:text-gray-200"
+      >×</button
+    >
   {/if}
 
   {#if $open}
     <ul
       use:melt={$menu}
       transition:fly={{ duration: 100, y: -4 }}
-      class="z-10 flex max-h-60 flex-col overflow-y-auto rounded border border-gray-200 bg-white shadow-lg"
+      class="z-10 flex max-h-60 flex-col overflow-y-auto rounded border border-gray-700 bg-gray-800 text-gray-200 shadow-lg"
     >
       {#each filtered as item (item.id)}
         <li
           use:melt={$option({ value: item.id, label: item.name })}
-          class="cursor-pointer px-2 py-1 text-sm data-[highlighted]:bg-blue-100 data-[selected]:font-semibold"
+          class="cursor-pointer px-2 py-1 text-sm data-highlighted:bg-blue-600 data-highlighted:text-white data-selected:font-semibold"
         >
           {item.name}
         </li>

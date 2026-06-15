@@ -1,38 +1,47 @@
 use std::{
+    collections::HashMap,
+    fmt::Display,
     ops::Deref,
     path::{Path, PathBuf},
 };
 
 use indexmap::IndexMap;
 use reikland::DeserializerConfig;
+use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize, de::DeserializeSeed};
 use snafu::{ResultExt, Snafu};
 
 use crate::infinite_fusion::{
     abilities::AbilityDex,
-    encounters::{Encounters, MapNames},
+    bootstrap::{Bootstrap, MoveOption, SpeciesOption, StatBounds, named_ids},
+    encounters::{EncounterMode, Encounters, MapNames},
     filters::{
-        FilterOptions, SpeciesOption, StatBounds, StatRange, ability_filter::AbilityFilterIndex,
-        custom_sprite_filter::CustomSpriteIndex, move_filter::MoveFilterIndex, named_ids,
-        stat_filter::StatIndex, type_filter::TypeFilterIndex,
+        StatRange, ability_filter::AbilityFilterIndex, custom_sprite_filter::CustomSpriteIndex,
+        move_filter::MoveFilterIndex, stat_filter::StatIndex, type_filter::TypeFilterIndex,
+        type_filter::fused_types,
     },
-    items::{ItemDex, ItemDexDeser},
-    moves::{MoveDex, MoveDexDeser},
+    items::{ItemDex, ItemDexDeser, ItemId},
+    moves::{MoveDex, MoveDexDeser, MoveId},
     species::{SpeciesDex, SpeciesDexDeser, SpeciesId, name_halves::NameMap},
-    types::TypeDex,
+    types::{TypeDex, TypeId},
 };
 
 pub mod abilities;
+pub mod bootstrap;
 pub mod encounters;
 pub mod filters;
+pub mod inspect;
 pub mod items;
+pub mod legendaries;
+pub mod map_encounters;
 pub mod moves;
+pub mod settings_data;
 pub mod species;
 pub mod types;
 
 // maybe just Box::leak this whole thing since the core data is immutable and it's going to get shared between threads??
 /// All data across every fusion. big old type since it's multiple indexmaps so ideally get some pointer around it
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct InfiniteFusionDex {
     abilities: AbilityDex,
     encounters: Encounters,
@@ -45,8 +54,12 @@ pub struct InfiniteFusionDex {
     ability_index: AbilityFilterIndex,
     move_index: MoveFilterIndex,
     custom_sprite_index: CustomSpriteIndex,
-    /// highest in-game dex number this game can actually fuse (`None` = no cap); feeds the hidden
-    /// `block_ids_above` filter
+    /// Reverse map of move -> the machine (TM/HM) item that teaches it. A move in a species'
+    /// determines between move tutor only moves and tm moves
+    machine_moves: HashMap<MoveId, ItemId>,
+    /// Species indices (by `SpeciesId`) flagged legendary in the game's `LEGENDARIES_LIST` for the `exclude_legendaries` filter
+    legendaries: RoaringBitmap,
+    /// highest in-game dex number this game can actually fuse (`None` = no cap)
     max_fusable_id: Option<u16>,
 }
 
@@ -62,13 +75,23 @@ pub enum GameVersion {
     Hoenn,
 }
 
+impl Display for GameVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GameVersion::Kanto => "Kanto",
+            GameVersion::Hoenn => "Hoenn",
+        }
+        .fmt(f)
+    }
+}
+
 impl GameVersion {
     // kanto species.dat contains species not actually in Kanto
     /// Highest in-game dex number actually fusable in this game
     pub fn max_fusable_id(self) -> Option<u16> {
         match self {
             GameVersion::Kanto => Some(501),
-            GameVersion::Hoenn => None,
+            GameVersion::Hoenn => Some(572), // Gastrodon E/W and shellos E/w have no autogen sprites so this cuts them off
         }
     }
 }
@@ -161,12 +184,37 @@ impl InfiniteFusionDex {
 
         let map_names =
             MapNames::from_file(base.join("Data/MapInfos.rxdata")).context(DeserializeSnafu)?;
-        let encounters = Encounters::from_bytes(
+        // we collect encounters.dat and encounters_remix.dat and merge em together then with the
+        // detected static and gift spawns
+        let classic = Encounters::wild_rows(
             &read_dat(Path::new("Data/encounters.dat"))?,
             &species,
             &map_names,
         )
         .context(DeserializeSnafu)?;
+        // Remix table is best-effort: Hoenn ships only an empty stub, so a read/parse miss just leaves every encounter Classic.
+        let remix = read_dat(Path::new("Data/encounters_remix.dat"))
+            .ok()
+            .and_then(|bytes| Encounters::wild_rows(&bytes, &species, &map_names).ok())
+            .map(|mut rows| {
+                for row in &mut rows {
+                    row.mode = EncounterMode::Remix;
+                }
+                rows
+            })
+            .unwrap_or_default();
+        let mut encounter_rows = Encounters::merge_modes(classic, remix);
+        encounter_rows.extend(map_encounters::collect(
+            &base.join("Data"),
+            &species,
+            &map_names,
+        ));
+        encounter_rows.extend(settings_data::collect(
+            &base.join("Data/Scripts"),
+            &species,
+            &map_names,
+        ));
+        let encounters = Encounters::from_rows(encounter_rows, species.len());
 
         let stat_index = StatIndex::build(&species);
         let type_index = TypeFilterIndex::build(&species, &types);
@@ -174,6 +222,15 @@ impl InfiniteFusionDex {
         let move_index = MoveFilterIndex::build(&species, &moves);
         let custom_sprite_index =
             CustomSpriteIndex::build(&species, &base.join("Data/sprites/CUSTOM_SPRITES"));
+
+        let machine_moves = items
+            .map()
+            .values()
+            .enumerate()
+            .filter_map(|(i, item)| item.move_taught.map(|mv| (mv, ItemId::from_usize(i))))
+            .collect();
+
+        let legendaries = legendaries::collect(&base.join("Data/Scripts"), &species);
 
         Ok(Self {
             abilities,
@@ -187,6 +244,8 @@ impl InfiniteFusionDex {
             ability_index,
             move_index,
             custom_sprite_index,
+            machine_moves,
+            legendaries,
             max_fusable_id: game_version.max_fusable_id(),
         })
     }
@@ -219,8 +278,8 @@ impl InfiniteFusionDex {
         &self.stat_index
     }
 
-    /// The data the front end loads on open to build its filter controls (names + ids for every dex, plus the stat slider bounds).
-    pub fn filter_options(&self) -> FilterOptions {
+    /// The data the front end loads on open to build its controls (names + ids for every dex, plus the stat slider bounds)
+    pub fn bootstrap(&self) -> Bootstrap {
         let min = self.species.min_stats();
         let max = self.species.max_stats();
 
@@ -230,23 +289,35 @@ impl InfiniteFusionDex {
             .values()
             .enumerate()
             .map(|(i, s)| SpeciesOption {
-                id: SpeciesId::from_usize(i).to_u32(),
+                id: SpeciesId::from_usize(i),
                 dex_id: s.id_number,
-                name: s.name.to_string(),
-                first: s.names.first_half.to_string(),
-                second: s.names.second_half.to_string(),
+                name: s.name.clone(),
             })
             .collect();
 
-        let mut types = named_ids(&self.types, |t| t.name.to_string());
-        types.retain(|t| t.name != "???");
+        let mut types = named_ids(&self.types, |t| t.name.clone());
+        types.retain(|t| t.name.as_ref() != "???");
 
-        FilterOptions {
+        Bootstrap {
             species_count: self.species.len(),
             species,
-            moves: named_ids(&self.moves, |m| m.name.to_string()),
+            moves: self
+                .moves
+                .map()
+                .values()
+                .enumerate()
+                .map(|(i, m)| MoveOption {
+                    id: MoveId::from_usize(i),
+                    name: m.name.clone(),
+                    ty: m.ty,
+                    category: m.category,
+                    power: m.power.map(|p| p.get()),
+                    description: m.description.clone(),
+                    flags: m.flags,
+                })
+                .collect(),
             types,
-            abilities: named_ids(&self.abilities, |a| a.name.to_string()),
+            abilities: named_ids(&self.abilities, |a| a.name.clone()),
             block_ids_above: self.max_fusable_id,
             stat_bounds: StatBounds {
                 hp: StatRange {
@@ -281,6 +352,33 @@ impl InfiniteFusionDex {
         }
     }
 
+    /// The display type ids of a fusion (1 for a mono-type fusion, else 2), given its encoded id
+    pub fn fusion_type_ids(&self, fusion_id: u32) -> (TypeId, Option<TypeId>) {
+        let n = self.species.len() as u32;
+        let head = self
+            .species
+            .get_item(SpeciesId::from_usize((fusion_id / n) as usize));
+        let body = self
+            .species
+            .get_item(SpeciesId::from_usize((fusion_id % n) as usize));
+        fused_types(head, body, &self.types)
+    }
+
+    /// A fusion's name (head's first half + body's second half), given its encoded id
+    pub fn fusion_name(&self, fusion_id: u32) -> inspect::FusionName {
+        let n = self.species.len() as u32;
+        let head = self
+            .species
+            .get_item(SpeciesId::from_usize((fusion_id / n) as usize));
+        let body = self
+            .species
+            .get_item(SpeciesId::from_usize((fusion_id % n) as usize));
+        inspect::FusionName {
+            first_half: head.names.first_half.clone(),
+            second_half: body.names.second_half.clone(),
+        }
+    }
+
     pub fn type_index(&self) -> &TypeFilterIndex {
         &self.type_index
     }
@@ -295,6 +393,18 @@ impl InfiniteFusionDex {
 
     pub fn custom_sprite_index(&self) -> &CustomSpriteIndex {
         &self.custom_sprite_index
+    }
+
+    /// The TM/HM that teaches `move_id`, if any. Used to label machine moves in the move pool
+    pub fn machine_for_move(&self, move_id: MoveId) -> Option<&str> {
+        self.machine_moves
+            .get(&move_id)
+            .map(|&id| &*self.items.get_item(id).name)
+    }
+
+    /// Species indices flagged legendary by the game's `LEGENDARIES_LIST`
+    pub fn legendaries(&self) -> &RoaringBitmap {
+        &self.legendaries
     }
 }
 

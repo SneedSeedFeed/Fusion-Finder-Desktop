@@ -28,7 +28,7 @@
 </script>
 
 <span use:melt={$root} class="relative flex h-4 w-full items-center">
-  <span class="block h-1 w-full rounded-full bg-gray-200">
+  <span class="block h-1 w-full rounded-full bg-gray-700">
     <span use:melt={$range} class="h-1 rounded-full bg-blue-500"></span>
   </span>
   {#each $thumbs as thumb}

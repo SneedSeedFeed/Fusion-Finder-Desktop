@@ -28,6 +28,14 @@ pub struct Encounter {
     pub chance: u8,
     pub min_level: u8,
     pub max_level: u8,
+    pub mode: EncounterMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub enum EncounterMode {
+    Classic,
+    Remix,
+    Both,
 }
 
 impl Encounters {
@@ -48,9 +56,83 @@ impl Encounters {
         species: &SpeciesDex,
         map_names: &MapNames,
     ) -> Result<Self, reikland::MarshalDeserializeError> {
+        Ok(Self::from_rows(
+            Self::wild_rows(bytes, species, map_names)?,
+            species.len(),
+        ))
+    }
+
+    /// Wild encounters pulled from game data
+    pub(crate) fn wild_rows(
+        bytes: &[u8],
+        species: &SpeciesDex,
+        map_names: &MapNames,
+    ) -> Result<Vec<Encounter>, reikland::MarshalDeserializeError> {
         let mut deser =
             reikland::Deserializer::with_config(bytes, DeserializerConfig::opinionated())?;
         EncountersDeser { species, map_names }.deserialize(&mut deser)
+    }
+
+    /// Merge mode data and collapse identical encounters between modes
+    pub(crate) fn merge_modes(classic: Vec<Encounter>, remix: Vec<Encounter>) -> Vec<Encounter> {
+        // everything that identifies an encounter *except* its mode
+        type Key = (SpeciesId, Arc<str>, EncounterMethod, u8, u8, u8);
+        let key = |e: &Encounter| {
+            (
+                e.species,
+                e.route.clone(),
+                e.method,
+                e.chance,
+                e.min_level,
+                e.max_level,
+            )
+        };
+
+        let mut seen: HashMap<Key, EncounterMode> = HashMap::new();
+        for e in &classic {
+            seen.insert(key(e), e.mode);
+        }
+        for e in &remix {
+            seen.entry(key(e))
+                .and_modify(|m| *m = EncounterMode::Both)
+                .or_insert(e.mode);
+        }
+
+        seen.into_iter()
+            .map(
+                |((species, route, method, chance, min_level, max_level), mode)| Encounter {
+                    species,
+                    route,
+                    method,
+                    chance,
+                    min_level,
+                    max_level,
+                    mode,
+                },
+            )
+            .collect()
+    }
+
+    /// Build the by-species index over `rows`. `species_count` sizes the lookup table.
+    pub(crate) fn from_rows(mut rows: Vec<Encounter>, species_count: usize) -> Self {
+        // group rows by species so `for_species` is a slice into a single allocation.
+        rows.sort_by_key(|e| e.species);
+
+        let mut by_species = vec![0..0; species_count].into_boxed_slice();
+        let mut i = 0;
+        while i < rows.len() {
+            let species = rows[i].species.to_usize();
+            let start = i;
+            while i < rows.len() && rows[i].species.to_usize() == species {
+                i += 1;
+            }
+            by_species[species] = start as u16..i as u16;
+        }
+
+        Encounters {
+            rows: rows.into_boxed_slice(),
+            by_species,
+        }
     }
 }
 
@@ -81,6 +163,13 @@ pub enum EncounterMethod {
     GoodRod,
     SuperRod,
     RockSmash,
+    /// Scripted fixed encounter recovered from map event scripts.
+    Static,
+    /// Pokemon handed to the player by an event (starters, fossils, in-game gifts).
+    Gift,
+    Roaming,
+    /// A wild encounter only reachable with the Radar
+    PokeRadar,
 }
 
 impl<'de> Deserialize<'de> for EncounterMethod {
@@ -173,7 +262,7 @@ struct EncountersDeser<'a> {
 }
 
 impl<'a, 'de> DeserializeSeed<'de> for EncountersDeser<'a> {
-    type Value = Encounters;
+    type Value = Vec<Encounter>;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
@@ -184,7 +273,7 @@ impl<'a, 'de> DeserializeSeed<'de> for EncountersDeser<'a> {
 }
 
 impl<'a, 'de> Visitor<'de> for EncountersDeser<'a> {
-    type Value = Encounters;
+    type Value = Vec<Encounter>;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
         formatter.write_str("encounters.dat (a ruby hash)")
@@ -211,24 +300,7 @@ impl<'a, 'de> Visitor<'de> for EncountersDeser<'a> {
             }
         }
 
-        // group rows by species so `for_species` is a slice into a single allocation.
-        rows.sort_by_key(|e| e.species);
-
-        let mut by_species = vec![0..0; self.species.len()].into_boxed_slice();
-        let mut i = 0;
-        while i < rows.len() {
-            let species = rows[i].species.to_usize();
-            let start = i;
-            while i < rows.len() && rows[i].species.to_usize() == species {
-                i += 1;
-            }
-            by_species[species] = start as u16..i as u16;
-        }
-
-        Ok(Encounters {
-            rows: rows.into_boxed_slice(),
-            by_species,
-        })
+        Ok(rows)
     }
 }
 
@@ -291,6 +363,7 @@ impl<'a, 'de> Visitor<'de> for EncounterEntryDeser<'a> {
                     chance: slot.weight,
                     min_level: slot.min_level,
                     max_level: slot.max_level,
+                    mode: EncounterMode::Classic,
                 })
             })
             .collect();
@@ -389,7 +462,7 @@ impl<'a, 'de> Visitor<'de> for SlotDeser<'a> {
 #[cfg(test)]
 pub(crate) mod test {
     use crate::{
-        infinite_fusion::encounters::{EncounterMethod, Encounters, MapNames},
+        infinite_fusion::encounters::{EncounterMethod, EncounterMode, Encounters, MapNames},
         test::{infinite_fusion_dir, infinite_fusion_hoenn_dir, maybe_decrypt},
     };
 
@@ -428,5 +501,37 @@ pub(crate) mod test {
             })
             .expect("Abra should be a Route 24 grass encounter");
         assert_eq!((abra_route24.min_level, abra_route24.max_level), (8, 12));
+    }
+
+    #[test]
+    fn merges_classic_and_remix_modes() {
+        let dir = infinite_fusion_dir();
+        let species = crate::infinite_fusion::species::test::load_species();
+        let map_names = MapNames::from_file(dir.join("Data/MapInfos.rxdata")).unwrap();
+
+        let classic = Encounters::wild_rows(
+            &maybe_decrypt(std::fs::read(dir.join("Data/encounters.dat")).unwrap()),
+            &species[0],
+            &map_names,
+        )
+        .unwrap();
+        let mut remix = Encounters::wild_rows(
+            &maybe_decrypt(std::fs::read(dir.join("Data/encounters_remix.dat")).unwrap()),
+            &species[0],
+            &map_names,
+        )
+        .unwrap();
+        for row in &mut remix {
+            row.mode = EncounterMode::Remix;
+        }
+
+        let merged = Encounters::merge_modes(classic.clone(), remix.clone());
+
+        // merging dedups shared rows, so the result is smaller than the naive concatenation
+        assert!(merged.len() < classic.len() + remix.len());
+        // and every mode is represented: shared encounters, plus ones exclusive to each table
+        assert!(merged.iter().any(|e| e.mode == EncounterMode::Both));
+        assert!(merged.iter().any(|e| e.mode == EncounterMode::Classic));
+        assert!(merged.iter().any(|e| e.mode == EncounterMode::Remix));
     }
 }

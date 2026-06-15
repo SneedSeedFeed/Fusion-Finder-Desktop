@@ -17,8 +17,11 @@
 //! 5 concurrent). Over budget a fetch *waits* for a slot rather than dropping, so a custom sprite
 //! still loads (after a short delay) without a refresh; fetched sheets and 404s are both cached.
 
+// doc comment above is super claude-y but this code is based on my own design just replacing some bullcrap
+// I did with a million layers of arc and oncelock with just using `moka` instead.
+
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     io::Cursor,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -46,13 +49,24 @@ const MAX_CONCURRENT_FETCHES: usize = 5;
 /// Finished PNG bytes for a single fused sprite, shared across cache hits.
 pub type SpriteBytes = Arc<[u8]>;
 
+/// Split a sprite filename stem `{head}.{body}{variant}` (e.g. `51.380`, `1.100a`) into its parts.
+/// The variant is the trailing letters after the body number ("" for the base sprite).
+fn parse_fusion_stem(stem: &str) -> Option<(u16, u16, &str)> {
+    let (head, rest) = stem.split_once('.')?;
+    let head = head.parse::<u16>().ok()?;
+    let split = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    let (body, variant) = rest.split_at(split);
+    Some((head, body.parse::<u16>().ok()?, variant))
+}
+
 /// Which fusions the game claims have a hand-drawn custom sprite, parsed from
-/// `Data/sprites/CUSTOM_SPRITES` (lines like `1.100.png`, `1.100a.png`). We keep only the *base*
-/// (letter-less) entries — that's what the default per-head spritesheet packs; alt variants live
-/// in separate sheets we don't fetch yet.
+/// `Data/sprites/CUSTOM_SPRITES` (lines like `1.100.png`, `1.100a.png`). Tracks every variant per
+/// `(head, body)` — "" (base) plus any alt-letter sheets.
 #[derive(Debug, Default)]
 pub struct SpriteManifest {
-    base: HashSet<(u16, u16)>,
+    variants: HashMap<(u16, u16), Vec<Box<str>>>,
 }
 
 impl SpriteManifest {
@@ -61,29 +75,67 @@ impl SpriteManifest {
     }
 
     fn parse(text: &str) -> Self {
-        let mut base = HashSet::new();
+        let mut variants: HashMap<(u16, u16), Vec<Box<str>>> = HashMap::new();
         for line in text.lines() {
             let stem = line.trim().strip_suffix(".png").unwrap_or(line.trim());
-            // `head.body`; alt entries (`1.100a`) fail the body parse and are skipped.
-            if let Some((head, body)) = stem.split_once('.')
-                && let (Ok(head), Ok(body)) = (head.parse::<u16>(), body.parse::<u16>())
-            {
-                base.insert((head, body));
+            if let Some((head, body, variant)) = parse_fusion_stem(stem) {
+                let list = variants.entry((head, body)).or_default();
+                if !list.iter().any(|v| &**v == variant) {
+                    list.push(variant.into());
+                }
             }
         }
-        Self { base }
+        // "" sorts before "a", so the base sprite leads each list
+        for list in variants.values_mut() {
+            list.sort();
+        }
+        Self { variants }
     }
 
     pub fn has_custom(&self, head: u16, body: u16) -> bool {
-        self.base.contains(&(head, body))
+        self.variants.contains_key(&(head, body))
+    }
+
+    pub fn variants_for(&self, head: u16, body: u16) -> &[Box<str>] {
+        self.variants.get(&(head, body)).map_or(&[], Vec::as_slice)
     }
 
     pub fn len(&self) -> usize {
-        self.base.len()
+        self.variants.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.base.is_empty()
+        self.variants.is_empty()
+    }
+}
+
+/// Sprite attribution from `Data/sprites/Sprite_Credits.csv` keyed by `{head}.{body}{variant}`
+#[derive(Debug, Default)]
+pub struct SpriteCredits {
+    by_stem: HashMap<Box<str>, Box<str>>,
+}
+
+impl SpriteCredits {
+    pub fn from_file(path: &Path) -> Self {
+        let mut by_stem = HashMap::new();
+        if let Ok(text) = std::fs::read_to_string(path) {
+            for line in text.lines() {
+                let mut cols = line.splitn(3, ',');
+                if let (Some(stem), Some(artist)) = (cols.next(), cols.next())
+                    && !stem.is_empty()
+                    && !artist.is_empty()
+                {
+                    by_stem.insert(stem.into(), artist.into());
+                }
+            }
+        }
+        Self { by_stem }
+    }
+
+    pub fn artist(&self, head: u16, body: u16, variant: &str) -> Option<&str> {
+        self.by_stem
+            .get(format!("{head}.{body}{variant}").as_str())
+            .map(|s| &**s)
     }
 }
 
@@ -93,6 +145,11 @@ pub enum SpriteError {
     NoSprite { head: u16, body: u16 },
     #[snafu(display("reading {path}"))]
     ReadFile {
+        source: std::io::Error,
+        path: String,
+    },
+    #[snafu(display("creating cache directory {path}"))]
+    CreateDir {
         source: std::io::Error,
         path: String,
     },
@@ -156,11 +213,13 @@ impl RateLimiter {
 
 /// Resolves + caches fusion sprites. `head`/`body` everywhere are *in-game dex numbers*
 /// (`SpeciesDetails::id_number`), not our internal `SpeciesId` indices — the caller maps.
+#[derive(Debug)]
 pub struct SpriteService {
     manifest: Arc<SpriteManifest>,
+    credits: SpriteCredits,
     /// `{game}/Graphics/Battlers/spritesheets_autogen`
     autogen_dir: PathBuf,
-    /// app-managed dir we download + persist custom head sheets into
+    /// `{game}\Graphics\CustomBattlers\spritesheets\spritesheets_custom`
     custom_cache_dir: PathBuf,
     client: reqwest::Client,
     rate_limiter: RateLimiter,
@@ -168,21 +227,27 @@ pub struct SpriteService {
     fetch_slots: tokio::sync::Semaphore,
     /// 1×1 transparent PNG served when a fusion has no sprite of any kind
     blank: SpriteBytes,
-    /// decoded head sheets (big, ~20MB each) — bounded by total bytes, not count. `None` is a
-    /// cached negative result (the head has no custom sheet on the server)
-    custom_sheets: Cache<u16, Option<Arc<RgbaImage>>>,
+    /// decoded head sheets keyed by `(head, variant)` and bounded by total bytes,
+    /// `None` is a cached negative result (no such sheet on the server)
+    custom_sheets: Cache<(u16, Box<str>), Option<Arc<RgbaImage>>>,
     autogen_sheets: Cache<u16, Arc<RgbaImage>>,
-    /// finished per-fusion PNG bytes (small) — bounded by count
-    sprites: Cache<(u16, u16), SpriteBytes>,
+    /// finished per-fusion PNG bytes (small), keyed by `(head, body, variant)` - bounded by count
+    sprites: Cache<(u16, u16, Box<str>), SpriteBytes>,
 }
 
 impl SpriteService {
-    pub fn new(game_dir: &Path, custom_cache_dir: PathBuf) -> Result<Self, SpriteError> {
+    pub fn new(game_dir: &Path) -> Result<Self, SpriteError> {
         let manifest_path = game_dir.join("Data/sprites/CUSTOM_SPRITES");
         let manifest = SpriteManifest::from_file(&manifest_path).context(ReadFileSnafu {
             path: manifest_path.display().to_string(),
         })?;
-        std::fs::create_dir_all(&custom_cache_dir).ok();
+        let credits = SpriteCredits::from_file(&game_dir.join("Data/sprites/Sprite_Credits.csv"));
+        // The game downloads custom sheets here too (see the constant `SPRITESHEET_FOLDER_PATH`)
+        let custom_cache_dir =
+            game_dir.join("Graphics/CustomBattlers/spritesheets/spritesheets_custom");
+        std::fs::create_dir_all(&custom_cache_dir).context(CreateDirSnafu {
+            path: custom_cache_dir.display().to_string(),
+        })?;
 
         let client = reqwest::Client::builder()
             .user_agent(concat!("fusion-finder/", env!("CARGO_PKG_VERSION")))
@@ -193,7 +258,7 @@ impl SpriteService {
         // weigh sheets by their raw pixel-buffer size so the cache caps memory, not entry count
         let by_bytes =
             |_k: &u16, v: &Arc<RgbaImage>| v.as_raw().len().min(u32::MAX as usize) as u32;
-        let by_bytes_opt = |_k: &u16, v: &Option<Arc<RgbaImage>>| {
+        let by_bytes_opt = |_k: &(u16, Box<str>), v: &Option<Arc<RgbaImage>>| {
             v.as_ref()
                 .map_or(0, |img| img.as_raw().len().min(u32::MAX as usize) as u32)
         };
@@ -203,6 +268,7 @@ impl SpriteService {
 
         Ok(Self {
             manifest: Arc::new(manifest),
+            credits,
             autogen_dir: game_dir.join("Graphics/Battlers/spritesheets_autogen"),
             custom_cache_dir,
             client,
@@ -211,13 +277,13 @@ impl SpriteService {
             blank,
             custom_sheets: Cache::builder()
                 .weigher(by_bytes_opt)
-                .max_capacity(96 * 1024 * 1024)
+                .max_capacity(64 * 1024 * 1024)
                 .build(),
             autogen_sheets: Cache::builder()
                 .weigher(by_bytes)
-                .max_capacity(32 * 1024 * 1024)
+                .max_capacity(16 * 1024 * 1024)
                 .build(),
-            sprites: Cache::builder().max_capacity(8192).build(),
+            sprites: Cache::builder().max_capacity(2048).build(),
         })
     }
 
@@ -225,30 +291,43 @@ impl SpriteService {
         &self.manifest
     }
 
-    /// PNG bytes for fusion `head.body`. Always succeeds — a fusion with no custom and no autogen
-    /// (e.g. the Gen-3 species the local sheets predate) resolves to a transparent placeholder.
-    pub async fn get_sprite(&self, head: u16, body: u16) -> SpriteBytes {
-        if let Some(bytes) = self.sprites.get(&(head, body)).await {
+    /// Custom sprite variants available for this fusion base first, each with its artist.
+    pub fn variants(&self, head: u16, body: u16) -> Vec<(Box<str>, Option<Box<str>>)> {
+        self.manifest
+            .variants_for(head, body)
+            .iter()
+            .map(|v| (v.clone(), self.credits.artist(head, body, v).map(Box::from)))
+            .collect()
+    }
+
+    /// PNG bytes for fusion `head.body` (a specific custom `variant`, "" for the base sprite)
+    pub async fn get_sprite(&self, head: u16, body: u16, variant: &str) -> SpriteBytes {
+        let key = (head, body, Box::<str>::from(variant));
+        if let Some(bytes) = self.sprites.get(&key).await {
             return bytes;
         }
-        let (bytes, cacheable) = self.resolve(head, body).await;
+        let (bytes, cacheable) = self.resolve(head, body, variant).await;
         // Only cache a *settled* result. A rate-limited/offline custom fetch is served as a
         // temporary autogen/blank fallback that must NOT stick, or the tile would be pinned to it
         // until restart; leaving it uncached lets the next request retry the custom.
         if cacheable {
-            self.sprites.insert((head, body), bytes.clone()).await;
+            self.sprites.insert(key, bytes.clone()).await;
         }
         bytes
     }
 
-    /// Bytes plus whether the result is settled (safe to cache). Prefers the custom sprite when
-    /// the manifest declares it and the fetched cell has pixels; else autogen; else a transparent
-    /// placeholder. Only an *offline/transient* custom-fetch failure is uncacheable (so it retries);
-    /// a confirmed-missing sheet (404) or blank cell settles to autogen.
-    async fn resolve(&self, head: u16, body: u16) -> (SpriteBytes, bool) {
-        if self.manifest.has_custom(head, body) {
-            match self.custom_sheet(head).await {
-                // sheet present: use the cell if it has pixels, else fall through to autogen
+    /// Bytes plus whether the result is settled (safe to cache). Prefers the requested custom
+    /// variant when the manifest declares it and the fetched cell has pixels; else (for the base
+    /// variant only) autogen; else a transparent placeholder. An offline/transient custom-fetch
+    /// failure is uncacheable so it retries; a confirmed-missing sheet (404) or blank cell settles.
+    async fn resolve(&self, head: u16, body: u16, variant: &str) -> (SpriteBytes, bool) {
+        let declared = self
+            .manifest
+            .variants_for(head, body)
+            .iter()
+            .any(|v| &**v == variant);
+        if declared {
+            match self.custom_sheet(head, variant).await {
                 Ok(Some(sheet)) => {
                     if let Some(cell) = crop_cell(&sheet, body, CUSTOM_COLUMNS)
                         && !is_blank(&cell)
@@ -257,15 +336,23 @@ impl SpriteService {
                         return (bytes, true);
                     }
                 }
-                // confirmed no custom sheet for this head (404) -> autogen settles it
                 Ok(None) => {}
                 Err(e) => {
-                    eprintln!("custom sheet {head}: {e}");
-                    return (self.autogen_or_blank(head, body).await, false);
+                    eprintln!("custom sheet {head}{variant}: {e}");
+                    return (self.fallback(head, body, variant).await, false);
                 }
             }
         }
-        (self.autogen_or_blank(head, body).await, true)
+        (self.fallback(head, body, variant).await, true)
+    }
+
+    /// Autogen only stands in for the canonical sprite. an alt request that can't be served just goes blank.
+    async fn fallback(&self, head: u16, body: u16, variant: &str) -> SpriteBytes {
+        if variant.is_empty() {
+            self.autogen_or_blank(head, body).await
+        } else {
+            self.blank.clone()
+        }
     }
 
     /// Autogen cell if one exists, otherwise the transparent placeholder.
@@ -292,14 +379,27 @@ impl SpriteService {
 
     /// `Ok(Some)` = sheet decoded; `Ok(None)` = the server has no sheet for this head (404, cached
     /// so we don't keep asking); `Err` = transient (offline etc.), not cached so it retries.
-    async fn custom_sheet(&self, head: u16) -> Result<Option<Arc<RgbaImage>>, Arc<SpriteError>> {
+    async fn custom_sheet(
+        &self,
+        head: u16,
+        variant: &str,
+    ) -> Result<Option<Arc<RgbaImage>>, Arc<SpriteError>> {
         self.custom_sheets
-            .try_get_with(head, self.load_custom_sheet(head))
+            .try_get_with(
+                (head, Box::<str>::from(variant)),
+                self.load_custom_sheet(head, variant),
+            )
             .await
     }
 
-    async fn load_custom_sheet(&self, head: u16) -> Result<Option<Arc<RgbaImage>>, SpriteError> {
-        let path = self.custom_cache_dir.join(format!("{head}/{head}.png"));
+    async fn load_custom_sheet(
+        &self,
+        head: u16,
+        variant: &str,
+    ) -> Result<Option<Arc<RgbaImage>>, SpriteError> {
+        let path = self
+            .custom_cache_dir
+            .join(format!("{head}/{head}{variant}.png"));
         if path.is_file() {
             let bytes = tokio::fs::read(&path).await.context(ReadFileSnafu {
                 path: path.display().to_string(),
@@ -316,7 +416,7 @@ impl SpriteService {
             .await
             .expect("fetch semaphore never closed");
 
-        let url = format!("{CUSTOM_SHEET_URL_BASE}/{head}/{head}.png");
+        let url = format!("{CUSTOM_SHEET_URL_BASE}/{head}/{head}{variant}.png");
         let response = self
             .client
             .get(&url)
@@ -407,12 +507,14 @@ mod test {
     }
 
     #[test]
-    fn manifest_parses_base_skips_alts() {
+    fn manifest_parses_variants() {
         let m = SpriteManifest::parse("1.4.png\n1.4a.png\n10.250.png\nbogus\n5.\n");
         assert!(m.has_custom(1, 4));
         assert!(m.has_custom(10, 250));
         assert!(!m.has_custom(1, 5));
-        // `1.4a` (alt) and the malformed lines don't add base entries
+        let variants: Vec<&str> = m.variants_for(1, 4).iter().map(|v| &**v).collect();
+        assert_eq!(variants, ["", "a"]);
+        assert_eq!(m.variants_for(10, 250).len(), 1);
         assert_eq!(m.len(), 2);
     }
 
@@ -422,8 +524,7 @@ mod test {
     #[tokio::test]
     async fn autogen_cell_round_trips() {
         let dir = crate::test::infinite_fusion_dir();
-        let cache = std::env::temp_dir().join("ff-sprite-test-cache");
-        let service = SpriteService::new(&dir, cache).unwrap();
+        let service = SpriteService::new(&dir).unwrap();
 
         // the manifest should have loaded thousands of declared customs
         assert!(service.manifest().len() > 1000);

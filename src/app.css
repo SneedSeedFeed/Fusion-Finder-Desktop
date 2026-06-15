@@ -1,1 +1,19 @@
 @import "tailwindcss";
+
+/* dark theme */
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  background-color: #0d1117;
+  color: #e6edf3;
+}
+
+/* let native form controls (selects, checkboxes, scrollbars) render dark too */
+select,
+option,
+input {
+  color-scheme: dark;
+}

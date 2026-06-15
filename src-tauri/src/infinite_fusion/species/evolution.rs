@@ -35,6 +35,30 @@ pub struct Evolution {
     kind: EvolutionKind,
 }
 
+impl Evolution {
+    pub fn target(&self) -> &EvolutionTarget {
+        &self.target
+    }
+
+    pub fn kind(&self) -> EvolutionKind {
+        self.kind
+    }
+}
+
+impl EvolutionTarget {
+    pub fn species(&self) -> SpeciesId {
+        match *self {
+            EvolutionTarget::From { target } | EvolutionTarget::Into { target } => target,
+        }
+    }
+
+    /// `true` for a forward evolution (this species evolves *into* the target), `false` for a
+    /// pre-evolution link (evolves *from*).
+    pub fn is_into(&self) -> bool {
+        matches!(self, EvolutionTarget::Into { .. })
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct EvolutionVisitor<'a> {
     pub(crate) move_dex: &'a MoveDex,

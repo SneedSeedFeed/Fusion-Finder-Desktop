@@ -22,6 +22,17 @@ fn body_type_of(s: &SpeciesDetails, fusion_type1: TypeId) -> TypeId {
     }
 }
 
+/// The two types of the fusion `head`/`body`
+pub fn fused_types(
+    head: &SpeciesDetails,
+    body: &SpeciesDetails,
+    types: &TypeDex,
+) -> (TypeId, Option<TypeId>) {
+    let type1 = head_type_of(head, types);
+    let type2 = body_type_of(body, type1);
+    (type1, (type2 != type1).then_some(type2))
+}
+
 /// For type filtering. `head_type` is purely per-species, but the body's contribution depends on
 /// the head's type (the duplicate-avoidance rule), so `body_type` is indexed by *both*.
 #[derive(Debug, Clone)]

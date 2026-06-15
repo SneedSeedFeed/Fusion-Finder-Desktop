@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     num::ParseIntError,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use regex::Regex;
@@ -82,8 +83,8 @@ impl NameMap {
 
 #[derive(Debug, Clone, serde::Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NameHalves {
-    pub first_half: Box<str>,
-    pub second_half: Box<str>,
+    pub first_half: Arc<str>,
+    pub second_half: Arc<str>,
 }
 
 #[derive(Debug, Snafu)]

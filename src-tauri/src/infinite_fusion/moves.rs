@@ -96,6 +96,17 @@ pub enum MoveCategory {
     Status = 2,
 }
 
+impl Display for MoveCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MoveCategory::Physical => "Physical",
+            MoveCategory::Special => "Special",
+            MoveCategory::Status => "Status",
+        }
+        .fmt(f)
+    }
+}
+
 impl<'de> Deserialize<'de> for MoveCategory {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where

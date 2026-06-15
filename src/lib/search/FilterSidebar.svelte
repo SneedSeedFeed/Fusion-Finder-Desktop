@@ -1,0 +1,125 @@
+<script lang="ts">
+  import type { Bootstrap } from "$lib/bindings";
+  import type { FilterState } from "$lib/searchFilters.svelte";
+  import Combobox from "$lib/Combobox.svelte";
+  import TypePicker from "$lib/search/TypePicker.svelte";
+  import StatSliders from "$lib/search/StatSliders.svelte";
+  import MovePicker from "$lib/search/MovePicker.svelte";
+
+  // `filters` is bindable so the ownership chain is explicit: this component binds sub-properties
+  // of it (filters.selectedTypes, filters.statRange, …) into child components, which Svelte only
+  // allows when the prop itself was received via `bind:`.
+  let {
+    filters = $bindable(),
+    options,
+  }: { filters: FilterState; options: Bootstrap } = $props();
+
+  // species available to pick — honours the hidden id cap so capped (e.g. Gen-3) mons aren't offered
+  const pickableSpecies = $derived(
+    filters.blockIdsAbove === null
+      ? options.species
+      : options.species.filter((s) => s.dex_id <= filters.blockIdsAbove!),
+  );
+</script>
+
+<aside
+  class="w-80 shrink-0 overflow-auto border-l border-gray-800 bg-gray-900/40 p-3"
+>
+  <div class="mb-2 flex items-center justify-between">
+    <h2 class="text-base font-semibold text-gray-100">Filters</h2>
+    <button
+      type="button"
+      class="rounded border border-gray-700 bg-gray-800 px-2 py-0.5 text-xs text-gray-300 hover:bg-gray-700"
+      onclick={() => filters.reset(options)}>Clear all</button
+    >
+  </div>
+
+  <label class="mb-3 flex items-center gap-2 text-sm">
+    <input
+      type="checkbox"
+      class="accent-blue-500"
+      bind:checked={filters.hasCustomSprite}
+    />
+    Only fusions with a custom sprite
+  </label>
+
+  <label class="mb-3 flex items-center gap-2 text-sm">
+    <input
+      type="checkbox"
+      class="accent-blue-500"
+      bind:checked={filters.excludeLegendaries}
+    />
+    Exclude legendaries
+  </label>
+
+  <fieldset class="mb-3 rounded-md border border-gray-800 p-2">
+    <legend class="px-1 text-sm font-semibold text-gray-300">Types</legend>
+    <TypePicker
+      types={options.types}
+      bind:value={filters.selectedTypes}
+      max={2}
+    />
+    <label class="mt-2 flex items-center gap-2 text-sm">
+      <input
+        type="checkbox"
+        class="accent-blue-500"
+        bind:checked={filters.monoType}
+      />
+      Mono-type only
+    </label>
+  </fieldset>
+
+  <fieldset class="mb-3 rounded-md border border-gray-800 p-2">
+    <legend class="px-1 text-sm font-semibold text-gray-300">Defense</legend>
+    <select
+      class="mb-2 w-full rounded border border-gray-700 bg-gray-800 p-1 text-xs text-gray-200"
+      bind:value={filters.defenseRelation}
+    >
+      <option value="Resist">Resists…</option>
+      <option value="Weak">Weak to…</option>
+      <option value="Immune">Immune to…</option>
+    </select>
+    <TypePicker types={options.types} bind:value={filters.defenseTypes} />
+  </fieldset>
+
+  <fieldset class="mb-3 rounded-md border border-gray-800 p-2">
+    <legend class="px-1 text-sm font-semibold text-gray-300">Stats</legend>
+    <StatSliders bounds={options.stat_bounds} bind:value={filters.statRange} />
+  </fieldset>
+
+  <fieldset class="mb-3 rounded-md border border-gray-800 p-2">
+    <legend class="px-1 text-sm font-semibold text-gray-300"
+      >Contains Pokémon</legend
+    >
+    <div class="mb-1">
+      <Combobox items={pickableSpecies} bind:value={filters.hasPokemon} />
+    </div>
+    <select
+      class="w-full rounded border border-gray-700 bg-gray-800 p-1 text-gray-200 disabled:opacity-50"
+      bind:value={filters.pokemonPosition}
+      disabled={filters.hasPokemon === null}
+    >
+      <option value="Either">either side</option>
+      <option value="Head">as head</option>
+      <option value="Body">as body</option>
+    </select>
+  </fieldset>
+
+  <fieldset class="mb-3 rounded-md border border-gray-800 p-2">
+    <legend class="px-1 text-sm font-semibold text-gray-300">Ability</legend>
+    <div class="mb-1">
+      <Combobox items={options.abilities} bind:value={filters.abilityId} />
+    </div>
+    <select
+      class="w-full rounded border border-gray-700 bg-gray-800 p-1 text-gray-200 disabled:opacity-50"
+      bind:value={filters.abilitySlot}
+      disabled={filters.abilityId === null}
+    >
+      <option value="Either">either slot</option>
+      <option value="Normal">normal</option>
+      <option value="Hidden">hidden</option>
+    </select>
+  </fieldset>
+
+  <MovePicker {filters} moves={options.moves} types={options.types} />
+</aside>
