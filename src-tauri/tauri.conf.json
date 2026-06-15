@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "fusion-finder-desktop",
+  "productName": "Fusion Finder",
   "version": "0.1.0",
-  "identifier": "fusion-finder-desktop",
+  "identifier": "io.github.sneedseedfeed.fusionfinder",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
@@ -12,13 +12,20 @@
   "app": {
     "windows": [
       {
-        "title": "fusion-finder-desktop",
-        "width": 800,
-        "height": 600
+        "title": "Fusion Finder",
+        "width": 1280,
+        "height": 832,
+        "minWidth": 1000,
+        "minHeight": 640,
+        "center": true
       }
     ],
     "security": {
-      "csp": null
+      "csp": {
+        "default-src": "'self'",
+        "img-src": "'self' data: asset: http://asset.localhost fusionsprite: http://fusionsprite.localhost",
+        "style-src": "'self' 'unsafe-inline'"
+      }
     }
   },
   "bundle": {
