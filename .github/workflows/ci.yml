@@ -1,0 +1,40 @@
+name: CI
+
+# Verify master stays buildable on every push and PR, does not (cannot) run tests
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# a newer push to the same branch/PR cancels the in-progress run
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck (svelte-check)
+        run: bun run check
+
+      # do we still compile?
+      - name: Build app (debug, no installer)
+        run: bun run tauri build --debug --no-bundle
