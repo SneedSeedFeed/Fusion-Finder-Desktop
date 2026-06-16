@@ -51,12 +51,13 @@
   ) {
     searching = true;
     try {
-      results = await invoke<number[]>("search", {
+      const buf = await invoke<ArrayBuffer>("search", {
         filters: payload,
         metric: sortMetric,
         metric2: ratioMetric,
         synergy,
       });
+      results = new Uint32Array(buf);
     } catch (e) {
       error = String(e);
     } finally {

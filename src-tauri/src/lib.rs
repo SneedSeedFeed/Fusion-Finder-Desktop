@@ -5,12 +5,14 @@ pub mod sprites;
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
+    time::Instant,
 };
 
 use serde::{Serializer, ser::SerializeSeq};
 use tauri::{
     AppHandle, Manager, Runtime, State,
     http::{Response, Uri},
+    ipc::InvokeResponseBody,
 };
 
 use crate::infinite_fusion::{
@@ -84,19 +86,20 @@ fn search(
     metric: Option<Metric>,
     metric2: Option<Metric>,
     synergy: Option<Vec<Stat>>,
-) -> Result<Box<[u32]>, &'static str> {
+) -> Result<tauri::ipc::Response, &'static str> {
+    let order_total = Instant::now();
     let synergy_stats = synergy
         .map(|stats| StatMask::from_stats(&stats))
         .unwrap_or(StatMask::ALL);
     let guard = state.0.read().unwrap();
     let dex = &guard.as_ref().ok_or("no game loaded")?.dex;
-    Ok(order_matches(
-        dex,
-        filters.apply(dex),
-        metric,
-        metric2,
-        synergy_stats,
-    ))
+
+    let order_start = Instant::now();
+    let order = order_matches(dex, filters.apply(dex), metric, metric2, synergy_stats);
+    let order_end = order_start.elapsed();
+    let order_total = order_total.elapsed();
+    eprintln!("ordering time: {order_end:?} search total time: {order_total:?}");
+    Ok(tauri::ipc::Response::new(InvokeResponseBody::Raw(order)))
 }
 
 /// The display name + type ids for a fusion, keyed by its encoded id so the caller can match results back to the grid cells that asked, even if the window has since scrolled.
