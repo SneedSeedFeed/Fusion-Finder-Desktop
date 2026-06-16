@@ -4,8 +4,6 @@ pub mod move_filter;
 pub mod stat_filter;
 pub mod type_filter;
 
-use std::time::Instant;
-
 use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
 use strum::VariantArray;
