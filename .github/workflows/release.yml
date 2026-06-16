@@ -1,14 +1,13 @@
 name: Release
 
-# Push a version tag (e.g. `git tag v0.1.0 && git push origin v0.1.0`) to build the Windows installers on GitHub's runners and publish them to a GitHub Release.
 on:
   push:
     tags: ["v*"]
 
 permissions:
-  contents: write # create the release and upload the installers
-  id-token: write # sign the build-provenance attestation
-  attestations: write # record the attestation
+  contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -30,7 +29,7 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
-      - name: Build and publish release
+      - name: Build and publish (single threaded)
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -39,9 +38,28 @@ jobs:
           releaseName: Fusion Finder ${{ github.ref_name }}
           releaseDraft: false
           prerelease: false
+          releaseAssetNamePattern: "[name]_[version]_[arch][setup][ext]"
 
-      # Cryptographically link the installers to this commit + workflow run
-      - name: Attest build provenance
+      - name: Attest provenance (single threaded)
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+
+      - name: Build and publish (multi threaded)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Fusion Finder ${{ github.ref_name }}
+          releaseDraft: false
+          prerelease: false
+          args: --features mt
+          releaseAssetNamePattern: "[name]_[version]_[arch]-mt[setup][ext]"
+
+      - name: Attest provenance (multi threaded)
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: |

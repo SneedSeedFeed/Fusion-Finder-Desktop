@@ -35,6 +35,11 @@ jobs:
       - name: Typecheck (svelte-check)
         run: bun run check
 
+      # mt build passing the sniff check?
+      - name: Typecheck the mt feature
+        working-directory: src-tauri
+        run: cargo check --features mt
+
       # do we still compile?
       - name: Build app (debug, no installer)
         run: bun run tauri build --debug --no-bundle
