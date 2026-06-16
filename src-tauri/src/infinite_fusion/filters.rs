@@ -650,20 +650,40 @@ pub fn order_matches(
     let ctx = MetricContext::new(dex, synergy_stats); // distribution-derived calibration, once
 
     // one f32 key per fusion: the metric itself, or the metric/secondary ratio
-    let mut keyed: Vec<(f32, u32)> = matches
-        .iter()
-        .map(|id| {
-            let value = primary.fused_value(&ctx, id / n, id % n);
-            let key = match secondary {
-                Some(denom) => value / denom.fused_value(&ctx, id / n, id % n),
-                None => value,
-            };
-            (key, id)
-        })
-        .collect();
+    let key_of = |id: u32| -> (f32, u32) {
+        let value = primary.fused_value(&ctx, id / n, id % n);
+        let key = match secondary {
+            Some(denom) => value / denom.fused_value(&ctx, id / n, id % n),
+            None => value,
+        };
+        (key, id)
+    };
 
-    // according to informal benchmarks this sort_unstable_by takes the majority of processing time
+    // most of the below is the expensive part of the workload and is typically faster under rayon
+    // its feature flagged so if users dont like it they switch to the non-mt version no problem
+    #[cfg(feature = "mt")]
+    let mut keyed: Vec<(f32, u32)> = {
+        use rayon::prelude::*;
+        // collect the bitmap to an indexable slice first; the iterator itself isn't parallelisable
+        matches
+            .iter()
+            .collect::<Vec<u32>>()
+            .into_par_iter()
+            .map(key_of)
+            .collect()
+    };
+    #[cfg(not(feature = "mt"))]
+    let mut keyed: Vec<(f32, u32)> = matches.iter().map(key_of).collect();
+
+    // according to informal benchmarks this sort takes the majority of processing time
+    #[cfg(feature = "mt")]
+    {
+        use rayon::prelude::*;
+        keyed.par_sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    }
+    #[cfg(not(feature = "mt"))]
     keyed.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+
     keyed.into_iter().map(|(_, id)| id).collect()
 }
 
