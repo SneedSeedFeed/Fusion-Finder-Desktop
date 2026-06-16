@@ -216,8 +216,13 @@ impl InfiniteFusionDex {
 
         let (t1, t2) = fused_types(h, b, self.types());
 
-        let fused = h.base_stats.fuse(&b.base_stats);
-        let stats = get_stats!(fused, h, b, [hp, atk, def, spa, spd, spe, bst]);
+        let stats = if head != body {
+            let fused = h.base_stats.fuse(&b.base_stats);
+            get_stats!(fused, h, b, [hp, atk, def, spa, spd, spe, bst])
+        } else {
+            let fused = h.base_stats;
+            get_stats!(fused, h, b, [hp, atk, def, spa, spd, spe, bst])
+        };
 
         FusionDetail {
             head: self.brief(head),
