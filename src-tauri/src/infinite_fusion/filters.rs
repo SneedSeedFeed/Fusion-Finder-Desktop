@@ -662,6 +662,7 @@ pub fn order_matches(
         })
         .collect();
 
+    // according to informal benchmarks this sort_unstable_by takes the majority of processing time
     keyed.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
     keyed.into_iter().map(|(_, id)| id).collect()
 }
