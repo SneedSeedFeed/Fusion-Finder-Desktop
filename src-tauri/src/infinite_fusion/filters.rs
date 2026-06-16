@@ -711,10 +711,10 @@ pub fn order_matches(
     metric: Option<Metric>,
     secondary: Option<Metric>,
     synergy_stats: StatMask,
-) -> Vec<u8> {
+) -> Box<[u32]> {
     let Some(primary) = metric else {
         // RoaringBitmap iterates ascending, which is exactly dex order
-        return matches.iter().flat_map(u32::to_ne_bytes).collect();
+        return matches.iter().collect();
     };
     let n = dex.species().len() as u32;
     let ctx_prep = Instant::now();
@@ -762,10 +762,7 @@ pub fn order_matches(
 
     eprintln!("{ctx_end:?} | {keying_end:?} | {sort_end:?}");
 
-    keyed
-        .into_iter()
-        .flat_map(|(_, id)| id.to_ne_bytes())
-        .collect()
+    keyed.into_iter().map(|(_, id)| id).collect()
 }
 
 #[cfg(test)]

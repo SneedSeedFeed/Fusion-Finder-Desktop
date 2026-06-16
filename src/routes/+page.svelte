@@ -22,7 +22,7 @@
   let changingGame = $state(false);
   let options = $state<Bootstrap | null>(null);
   let error = $state<string | null>(null);
-  let results = $state<number[]>([]);
+  let results = $state<Uint32Array>(new Uint32Array());
   let searching = $state(false);
   // the fusion (head/body species indices) shown in the inspect modal, if any
   let inspecting = $state<{ head: number; body: number } | null>(null);
@@ -81,7 +81,7 @@
     config = c;
     changingGame = false;
     options = null;
-    results = [];
+    results = new Uint32Array();
     loadDex();
   }
 

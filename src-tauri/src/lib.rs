@@ -12,7 +12,6 @@ use serde::{Serializer, ser::SerializeSeq};
 use tauri::{
     AppHandle, Manager, Runtime, State,
     http::{Response, Uri},
-    ipc::InvokeResponseBody,
 };
 
 use crate::infinite_fusion::{
@@ -99,7 +98,9 @@ fn search(
     let order_end = order_start.elapsed();
     let order_total = order_total.elapsed();
     eprintln!("ordering time: {order_end:?} search total time: {order_total:?}");
-    Ok(tauri::ipc::Response::new(InvokeResponseBody::Raw(order)))
+    // pack the ids as raw little-/native-endian bytes so the IPC skips JSON entirely
+    let bytes: Vec<u8> = order.iter().flat_map(|id| id.to_ne_bytes()).collect();
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 /// The display name + type ids for a fusion, keyed by its encoded id so the caller can match results back to the grid cells that asked, even if the window has since scrolled.

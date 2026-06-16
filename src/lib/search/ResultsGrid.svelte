@@ -15,7 +15,7 @@
     onInspect,
   }: {
     options: Bootstrap;
-    results: number[];
+    results: Uint32Array;
     onInspect: (f: { head: number; body: number }) => void;
   } = $props();
 
