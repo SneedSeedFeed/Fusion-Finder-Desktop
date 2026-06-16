@@ -8,7 +8,13 @@
   import ResultsGrid from "$lib/search/ResultsGrid.svelte";
   import FilterSidebar from "$lib/search/FilterSidebar.svelte";
   import { FilterState } from "$lib/searchFilters.svelte";
-  import type { Bootstrap, GameConfig, Metric } from "$lib/bindings";
+  import {
+    SYNERGY_STATS,
+    type Bootstrap,
+    type GameConfig,
+    type Metric,
+    type SynergyStat,
+  } from "$lib/bindings";
 
   // undefined = still checking which game is loaded, null = no game (show setup), else loaded
   let config = $state<GameConfig | null | undefined>(undefined);
@@ -26,6 +32,8 @@
   let metric = $state<Metric | null>(null);
   let metric2 = $state<Metric | null>(null);
   let sortDesc = $state(false);
+  // which stats count toward the synergy metrics (all by default); only used by Synergy sorts
+  let synergyStats = $state<SynergyStat[]>(SYNERGY_STATS.map((s) => s.value));
 
   // backend always returns the canonical ascending order sort direction is pure presentation, so descending is just this list read in reverse
   // saves us re-computing the set just for flipping from asc to desc
@@ -39,6 +47,7 @@
     payload: Record<string, unknown>,
     sortMetric: Metric | null,
     ratioMetric: Metric | null,
+    synergy: SynergyStat[],
   ) {
     searching = true;
     try {
@@ -46,6 +55,7 @@
         filters: payload,
         metric: sortMetric,
         metric2: ratioMetric,
+        synergy,
       });
     } catch (e) {
       error = String(e);
@@ -85,8 +95,9 @@
     const payload = filters.build(options); // reads filter state -> registers deps
     const sortMetric = metric;
     const ratioMetric = metric2;
+    const synergy = [...synergyStats]; // register dep; snapshot for the debounced call
     const handle = setTimeout(
-      () => runSearch(payload, sortMetric, ratioMetric),
+      () => runSearch(payload, sortMetric, ratioMetric, synergy),
       200,
     );
     return () => clearTimeout(handle);
@@ -120,6 +131,7 @@
           bind:metric
           bind:metric2
           bind:sortDesc
+          bind:synergyStats
           version={config.version}
           onChangeGame={() => (changingGame = true)}
           onOpenAreas={() => (showAreas = true)}

@@ -1,3 +1,5 @@
+use std::ops::Index;
+
 use strum::VariantArray;
 
 macro_rules! create_base_stats {
@@ -72,12 +74,47 @@ impl BaseStats {
     }
 }
 
+impl Index<u8> for BaseStats {
+    type Output = u8;
+
+    fn index(&self, index: u8) -> &Self::Output {
+        match index {
+            0 => &self.hp,
+            1 => &self.atk,
+            2 => &self.def,
+            3 => &self.spa,
+            4 => &self.spd,
+            5 => &self.spe,
+            _ => panic!("index out of bounds"),
+        }
+    }
+}
+
+impl Index<Stat> for BaseStats {
+    type Output = u8;
+
+    fn index(&self, index: Stat) -> &Self::Output {
+        match index {
+            Stat::Hp => &self.hp,
+            Stat::Atk => &self.atk,
+            Stat::Def => &self.def,
+            Stat::Spa => &self.spa,
+            Stat::Spd => &self.spd,
+            Stat::Spe => &self.spe,
+        }
+    }
+}
+
 fn fuse_calc(dominant: u8, other: u8) -> u8 {
     ((2 * u16::from(dominant) + u16::from(other)) / 3) as u8
 }
 
-/// One of the six base stats, used to index per-stat tables like [`StatDistributions`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::VariantArray)]
+/// One of the six base stats, used to index per-stat tables like [`StatDistributions`]. Serialized
+/// lowercase (`"hp"`, `"atk"`, …) to match the frontend's stat keys.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, strum::VariantArray, serde::Deserialize, serde::Serialize,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum Stat {
     Hp = 0,
     Atk = 1,
@@ -127,6 +164,39 @@ impl StatDistributions {
 
     pub fn count(&self) -> u16 {
         self.count
+    }
+
+    /// The cumulative rank of `value` for `stat` in `0..=1`: the fraction of species whose base
+    /// `stat` is at or below `value`. The inverse of [`percentile`](Self::percentile) — it maps a
+    /// raw stat onto its place in the field, compressing extremes (255 HP -> ~1.0). Empty -> 0.
+    pub fn rank(&self, stat: Stat, value: u8) -> f32 {
+        if self.count == 0 {
+            return 0.0;
+        }
+        let hist = &self.histograms[stat as usize];
+        let at_or_below: u32 = hist[..=usize::from(value)]
+            .iter()
+            .map(|&c| u32::from(c))
+            .sum();
+        at_or_below as f32 / f32::from(self.count)
+    }
+
+    /// A full `[stat][value] -> rank` table (the cumulative distribution per stat), so a hot loop can
+    /// turn [`rank`](Self::rank)'s O(value) scan into an O(1) lookup. Build once; empty -> all-zero.
+    pub fn rank_table(&self) -> Box<[[f32; 256]; 6]> {
+        let mut table = Box::new([[0.0f32; 256]; 6]);
+        if self.count == 0 {
+            return table;
+        }
+        let total = f32::from(self.count);
+        for (stat, hist) in self.histograms.iter().enumerate() {
+            let mut cumulative = 0u32;
+            for (value, &count) in hist.iter().enumerate() {
+                cumulative += u32::from(count);
+                table[stat][value] = cumulative as f32 / total;
+            }
+        }
+        table
     }
 
     /// The `q`-quantile (`0..=1`) of `stat` across all recorded species: the smallest base value at

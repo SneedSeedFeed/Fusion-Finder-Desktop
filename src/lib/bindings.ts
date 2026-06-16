@@ -217,6 +217,7 @@ export const METRIC_GROUPS = [
       { value: "SumOfParts", label: "Sum of Parts" },
       { value: "SynergyRatio", label: "Synergy Ratio" },
       { value: "SurplusOverBest", label: "Surplus vs Best" },
+      { value: "BalancedSynergy", label: "Balanced Synergy" },
     ],
   },
   {
@@ -257,6 +258,22 @@ export const METRICS: readonly MetricOption[] = METRIC_GROUPS.flatMap(
 export function metricLabel(value: Metric): string {
   return METRICS.find((m) => m.value === value)?.label ?? value;
 }
+
+// the synergy metrics react to a per-stat include/exclude selection (the toolbar stat chips)
+export const SYNERGY_METRICS: ReadonlySet<Metric> = new Set(
+  METRIC_GROUPS.find((g) => g.label === "Synergy")!.metrics.map((m) => m.value),
+);
+
+// stats that can count toward synergy; `value` matches the backend `Stat` enum (lowercase)
+export const SYNERGY_STATS = [
+  { value: "hp", label: "HP" },
+  { value: "atk", label: "Atk" },
+  { value: "def", label: "Def" },
+  { value: "spa", label: "SpA" },
+  { value: "spd", label: "SpD" },
+  { value: "spe", label: "Spe" },
+] as const;
+export type SynergyStat = (typeof SYNERGY_STATS)[number]["value"];
 
 // matches the backend EvolutionFilter enum (variant names); null = no evolution constraint
 export type EvolutionFilter = "CanEvolve" | "FullyEvolved";

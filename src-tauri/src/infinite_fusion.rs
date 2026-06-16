@@ -16,13 +16,18 @@ use crate::infinite_fusion::{
     bootstrap::{Bootstrap, MoveOption, SpeciesOption, StatBounds, named_ids},
     encounters::{EncounterMode, Encounters, MapNames},
     filters::{
-        StatRange, ability_filter::AbilityFilterIndex, custom_sprite_filter::CustomSpriteIndex,
-        move_filter::MoveFilterIndex, stat_filter::StatIndex, type_filter::TypeFilterIndex,
-        type_filter::fused_types,
+        SpeedCurve, StatRange,
+        ability_filter::AbilityFilterIndex,
+        custom_sprite_filter::CustomSpriteIndex,
+        move_filter::MoveFilterIndex,
+        stat_filter::StatIndex,
+        type_filter::{TypeFilterIndex, fused_types},
     },
     items::{ItemDex, ItemDexDeser, ItemId},
     moves::{MoveDex, MoveDexDeser, MoveId},
-    species::{SpeciesDex, SpeciesDexDeser, SpeciesId, name_halves::NameMap},
+    species::{
+        SpeciesDex, SpeciesDexDeser, SpeciesId, base_stats::BaseStats, name_halves::NameMap,
+    },
     types::{TypeDex, TypeId},
 };
 
@@ -62,6 +67,12 @@ pub struct InfiniteFusionDex {
     legendaries: RoaringBitmap,
     /// highest in-game dex number this game can actually fuse (`None` = no cap)
     max_fusable_id: Option<u16>,
+    /// local-ish cache of all species stats to speed up search, costs like 3kb of ram to have this on standby
+    base_stats: Box<[BaseStats]>,
+    /// per-stat cumulative ranks, so `BalancedSynergy` does O(1) lookups instead of O(value) scans
+    rank: Box<[[f32; 256]; 6]>,
+    /// speed tier calculation curve for this game data
+    speed_curve: SpeedCurve,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -232,6 +243,10 @@ impl InfiniteFusionDex {
             .collect();
 
         let legendaries = legendaries::collect(&base.join("Data/Scripts"), &species);
+        let base_stats = species.map().values().map(|s| s.base_stats).collect();
+        let dist = species.stat_distributions();
+        let rank = dist.rank_table();
+        let speed_curve = SpeedCurve::from_speed(dist);
 
         Ok(Self {
             abilities,
@@ -248,6 +263,9 @@ impl InfiniteFusionDex {
             machine_moves,
             legendaries,
             max_fusable_id: game_version.max_fusable_id(),
+            base_stats,
+            rank,
+            speed_curve,
         })
     }
 
@@ -277,6 +295,14 @@ impl InfiniteFusionDex {
 
     pub fn stat_index(&self) -> &StatIndex {
         &self.stat_index
+    }
+
+    pub fn base_stats(&self) -> &[BaseStats] {
+        &self.base_stats
+    }
+
+    pub fn speed_curve(&self) -> SpeedCurve {
+        self.speed_curve
     }
 
     /// The data the front end loads on open to build its controls (names + ids for every dex, plus the stat slider bounds)

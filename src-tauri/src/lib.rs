@@ -17,9 +17,9 @@ use crate::infinite_fusion::{
     GameVersion, InfiniteFusionDex,
     area::AreaEncounter,
     bootstrap::Bootstrap,
-    filters::{Filters, Metric, order_matches},
+    filters::{Filters, Metric, StatMask, order_matches},
     inspect::{FusionDetail, FusionName},
-    species::{SpeciesId, name_halves::NameMap},
+    species::{SpeciesId, base_stats::Stat, name_halves::NameMap},
     types::TypeId,
 };
 use crate::sprites::SpriteService;
@@ -74,17 +74,29 @@ fn fusion_detail(
     Ok(detail)
 }
 
-/// Run a filter set, returning the matching fusion ids (`head * species_count + body`) ordered ascending by `metric`, or by the `metric / metric2` ratio when both are given
+/// Run a filter set, returning the matching fusion ids (`head * species_count + body`) ordered
+/// ascending by `metric`, or by the `metric / metric2` ratio when both are given. `synergy` is the
+/// set of stats that count toward the synergy metrics (empty / absent = all of them).
 #[tauri::command]
 fn search(
     state: State<'_, AppState>,
     filters: Filters,
     metric: Option<Metric>,
     metric2: Option<Metric>,
-) -> Result<Vec<u32>, String> {
+    synergy: Option<Vec<Stat>>,
+) -> Result<Box<[u32]>, &'static str> {
+    let synergy_stats = synergy
+        .map(|stats| StatMask::from_stats(&stats))
+        .unwrap_or(StatMask::ALL);
     let guard = state.0.read().unwrap();
     let dex = &guard.as_ref().ok_or("no game loaded")?.dex;
-    Ok(order_matches(dex, filters.apply(dex), metric, metric2))
+    Ok(order_matches(
+        dex,
+        filters.apply(dex),
+        metric,
+        metric2,
+        synergy_stats,
+    ))
 }
 
 /// The display name + type ids for a fusion, keyed by its encoded id so the caller can match results back to the grid cells that asked, even if the window has since scrolled.

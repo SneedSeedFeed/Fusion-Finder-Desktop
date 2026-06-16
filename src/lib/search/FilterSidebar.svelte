@@ -20,6 +20,20 @@
       ? options.species
       : options.species.filter((s) => s.dex_id <= filters.blockIdsAbove!),
   );
+
+  const speciesName = $derived(
+    new Map(options.species.map((s) => [s.id, s.name])),
+  );
+
+  // the ignore-list combobox is "add then clear": picking a species folds it into the list and
+  // resets the box for the next pick.
+  let ignorePick = $state<number | null>(null);
+  $effect(() => {
+    if (ignorePick !== null) {
+      filters.addIgnored(ignorePick);
+      ignorePick = null;
+    }
+  });
 </script>
 
 <aside
@@ -131,6 +145,34 @@
       <option value="Normal">normal</option>
       <option value="Hidden">hidden</option>
     </select>
+  </fieldset>
+
+  <fieldset class="mb-3 rounded-md border border-gray-800 p-2">
+    <legend class="px-1 text-sm font-semibold text-gray-300"
+      >Ignore Pokémon</legend
+    >
+    <div class="mb-1">
+      <Combobox
+        items={pickableSpecies}
+        bind:value={ignorePick}
+        placeholder="-- add to block list --"
+      />
+    </div>
+    {#if filters.ignoredSpecies.length}
+      <div class="flex flex-wrap gap-1">
+        {#each filters.ignoredSpecies as id (id)}
+          <button
+            type="button"
+            class="flex items-center gap-1 rounded border border-gray-700 bg-gray-800 px-1.5 py-0.5 text-xs text-gray-200 hover:border-red-500"
+            title="Remove from block list"
+            onclick={() => filters.removeIgnored(id)}
+          >
+            {speciesName.get(id) ?? `#${id}`}
+            <span class="text-gray-400">×</span>
+          </button>
+        {/each}
+      </div>
+    {/if}
   </fieldset>
 
   <MovePicker {filters} moves={options.moves} types={options.types} />

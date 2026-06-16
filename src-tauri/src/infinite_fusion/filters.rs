@@ -6,6 +6,7 @@ pub mod type_filter;
 
 use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
+use strum::VariantArray;
 
 use crate::infinite_fusion::{
     Dex, DexId, InfiniteFusionDex,
@@ -14,7 +15,7 @@ use crate::infinite_fusion::{
     moves::MoveId,
     species::{
         SpeciesDetails, SpeciesId,
-        base_stats::{Stat, StatDistributions},
+        base_stats::{BaseStats, Stat, StatDistributions},
     },
     types::TypeDex,
     types::TypeId,
@@ -75,6 +76,9 @@ pub struct Filters {
     /// keep only fusions that can still evolve, or only fully-evolved ones (see `EvolutionFilter`)
     #[serde(default)]
     pub evolution: Option<EvolutionFilter>,
+    /// drop any fusion with one of these species on either side (a user-curated block list)
+    #[serde(default)]
+    pub ignored_species: Box<[SpeciesId]>,
 }
 
 /// Constrain a fusion by whether it can still evolve. A fusion evolves when *either* component has a
@@ -93,23 +97,28 @@ impl Filters {
         let n = dex.species().len();
         let mut result = RoaringBitmap::new();
 
-        // species (by index) allowed by the id cap and/or the legendary exclusion; both head and
-        // body must be allowed. Built once, then intersected per-head like any other constraint.
-        let allowed: Option<RoaringBitmap> =
-            (self.block_ids_above.is_some() || self.exclude_legendaries).then(|| {
-                let legendaries = dex.legendaries();
-                dex.species()
-                    .map()
-                    .values()
-                    .enumerate()
-                    .filter_map(|(i, s)| {
-                        let under_cap = self.block_ids_above.is_none_or(|max| s.id_number <= max);
-                        let not_legendary =
-                            !self.exclude_legendaries || !legendaries.contains(i as u32);
-                        (under_cap && not_legendary).then_some(i as u32)
-                    })
-                    .collect()
-            });
+        // species (by index) allowed by the id cap, the legendary exclusion and/or the user's block
+        // list; both head and body must be allowed. Built once, then intersected per-head like any
+        // other constraint.
+        let ignored: RoaringBitmap = self.ignored_species.iter().map(|s| s.to_u32()).collect();
+        let allowed: Option<RoaringBitmap> = (self.block_ids_above.is_some()
+            || self.exclude_legendaries
+            || !ignored.is_empty())
+        .then(|| {
+            let legendaries = dex.legendaries();
+            dex.species()
+                .map()
+                .values()
+                .enumerate()
+                .filter_map(|(i, s)| {
+                    let under_cap = self.block_ids_above.is_none_or(|max| s.id_number <= max);
+                    let not_legendary =
+                        !self.exclude_legendaries || !legendaries.contains(i as u32);
+                    let not_ignored = !ignored.contains(i as u32);
+                    (under_cap && not_legendary && not_ignored).then_some(i as u32)
+                })
+                .collect()
+        });
 
         // species (by index) on the qualifying side of the evolution filter: the still-evolving
         // ones for `CanEvolve`, the fully-evolved ones for `FullyEvolved`. The per-head logic below
@@ -367,6 +376,8 @@ pub enum Metric {
     SynergyRatio,
     // fused BST minus the stronger parent, positive only when the fusion outright beats both
     SurplusOverBest,
+    // SumOfParts but on percentile-normalized stats (each stat -> its rank in the field), hopefully reducing the influence of the extremes
+    BalancedSynergy,
     // effective health metrics
     PhysicalEHp,
     SpecialEHp,
@@ -394,18 +405,38 @@ fn harmonic_mean(a: f32, b: f32) -> f32 {
     2.0 * a * b / sum
 }
 
+/// Which base stats count toward the synergy metrics. Lets a physical attacker ignore synergy gained
+/// from Sp. Atk, a Trick Room pick ignore Speed, etc. An empty selection is treated as "all".
+#[derive(Debug, Clone, Copy)]
+pub struct StatMask(u8); // bit `stat as u8` set = included
+
+impl StatMask {
+    pub const ALL: StatMask = StatMask(0b0011_1111);
+
+    pub fn from_stats(stats: &[Stat]) -> Self {
+        if stats.is_empty() {
+            return Self::ALL;
+        }
+        StatMask(stats.iter().fold(0, |bits, &s| bits | 1 << s as u8))
+    }
+
+    fn contains(self, stat: Stat) -> bool {
+        self.0 & (1 << stat as u8) != 0
+    }
+}
+
 /// Logistic mapping from speed to its estimated offensive usefulness.
 /// Mapping is calibrated to the dex's own speed distribution.
 /// Centred on the 50th percentile and tapers at p10 and p90, so a handful of speed freaks can't stretch it.
 /// Is intended to reward attackers at "efficient" speed stats like Garchomp who have enough speed to outspeed and kill but don't waste it like Regieleki
 #[derive(Debug, Clone, Copy)]
-struct SpeedCurve {
-    midpoint: f32, // median speed -> factor 0.5
-    steepness: f32,
+pub struct SpeedCurve {
+    pub(crate) midpoint: f32, // median speed -> factor 0.5
+    pub(crate) steepness: f32,
 }
 
 impl SpeedCurve {
-    fn from_speed(dist: &StatDistributions) -> Self {
+    pub(crate) fn from_speed(dist: &StatDistributions) -> Self {
         let p = |q| f32::from(dist.percentile(Stat::Spe, q));
         let (p10, p50, p90) = (p(0.10), p(0.50), p(0.90));
         // endpoint usefulness: a p10 mon ~= EDGE, a p90 mon ~= 1 - EDGE
@@ -418,7 +449,7 @@ impl SpeedCurve {
         }
     }
 
-    fn factor(&self, spe: f32) -> f32 {
+    pub(crate) fn factor(&self, spe: f32) -> f32 {
         1.0 / (1.0 + (-self.steepness * (spe - self.midpoint)).exp())
     }
 }
@@ -480,34 +511,85 @@ impl TypeDefense {
 /// add fields here rather than recomputing per fusion.
 struct MetricContext<'a> {
     dex: &'a InfiniteFusionDex,
-    speed: SpeedCurve,
     type_defense: TypeDefense,
+    /// the synergy stats, expanded once so the per-fusion loop iterates only the included ones
+    synergy_stats: Box<[Stat]>,
+    raw_size: Box<[f32]>,
+    norm_size: Box<[f32]>,
 }
 
 impl<'a> MetricContext<'a> {
-    fn new(dex: &'a InfiniteFusionDex) -> Self {
+    fn new(dex: &'a InfiniteFusionDex, synergy_mask: StatMask) -> Self {
+        let dist = dex.species().stat_distributions();
+        let rank = dist.rank_table();
+        let synergy_stats: Box<[Stat]> = Stat::VARIANTS
+            .iter()
+            .copied()
+            .filter(|&s| synergy_mask.contains(s))
+            .collect();
+
+        let (raw_size, norm_size) = dex
+            .base_stats
+            .iter()
+            .map(|s| {
+                (
+                    synergy_stats
+                        .iter()
+                        .map(|&st| f32::from(s.get(st)))
+                        .sum::<f32>(),
+                    synergy_stats
+                        .iter()
+                        .map(|&st| rank[st as usize][usize::from(s.get(st))])
+                        .sum::<f32>(),
+                )
+            })
+            .collect::<(Vec<f32>, Vec<f32>)>();
+
+        let raw_size = raw_size.into_boxed_slice();
+        let norm_size = norm_size.into_boxed_slice();
         Self {
             dex,
-            speed: SpeedCurve::from_speed(dex.species().stat_distributions()),
             type_defense: TypeDefense::build(dex.types()),
+            synergy_stats,
+            raw_size,
+            norm_size,
         }
     }
 }
 
 impl Metric {
     fn fused_value(self, ctx: &MetricContext, head: u32, body: u32) -> f32 {
-        let dex = ctx.dex;
-        let head_sp = dex.species().get_item(SpeciesId::from_u32(head));
-        let body_sp = dex.species().get_item(SpeciesId::from_u32(body));
-        let fused = head_sp.base_stats.fuse(&body_sp.base_stats);
+        let (h, b) = (head as usize, body as usize);
+        let fused = ctx.dex.base_stats[h].fuse(&ctx.dex.base_stats[b]);
         let hp = f32::from(fused.hp());
         let (atk, spa) = (f32::from(fused.atk()), f32::from(fused.spa()));
         let (phys_ehp, spec_ehp) = (hp * f32::from(fused.def()), hp * f32::from(fused.spd()));
         // lazily evaluated since only the relevant arms need them
-        let sweep_speed = || ctx.speed.factor(f32::from(fused.spe()));
+        let sweep_speed = || ctx.dex.speed_curve().factor(f32::from(fused.spe()));
+        // only the type-adjusted metrics need the full `SpeciesDetails` (for its typing), so the
+        // pointer-chase into it stays behind this closure rather than on every fusion's hot path
         let type_defense = || {
+            let dex = ctx.dex;
+            let head_sp = dex.species().get_item(SpeciesId::from_u32(head));
+            let body_sp = dex.species().get_item(SpeciesId::from_u32(body));
             let (t1, t2) = fused_types(head_sp, body_sp, dex.types());
             ctx.type_defense.factor(t1, t2)
+        };
+        // synergy "size" of the fused stat block, summed over the selected stats only. `raw` is the
+        // plain stat total (full mask == BST); `normalized` maps each stat onto its precomputed rank
+        // in the field so extreme raw stats compress (`BalancedSynergy`). The two parents' sizes are
+        // pre-summed per species in the context (`raw_size` / `norm_size`).
+        let raw = |s: &BaseStats| -> f32 {
+            ctx.synergy_stats
+                .iter()
+                .map(|&st| f32::from(s.get(st)))
+                .sum()
+        };
+        let normalized = |s: &BaseStats| -> f32 {
+            ctx.synergy_stats
+                .iter()
+                .map(|&st| ctx.dex.rank[st as usize][usize::from(s.get(st))])
+                .sum()
         };
         match self {
             Metric::Hp => hp,
@@ -518,21 +600,21 @@ impl Metric {
             Metric::Spe => fused.spe().into(),
             Metric::Bst => fused.bst().into(),
             Metric::SumOfParts => {
-                let fused_bst = fused.bst() as f32;
-                let head_bst = head_sp.base_stats.bst() as f32;
-                let body_bst = body_sp.base_stats.bst() as f32;
-
-                (fused_bst - head_bst) + (fused_bst - body_bst)
+                let f = raw(&fused);
+                (f - ctx.raw_size[h]) + (f - ctx.raw_size[b])
             }
             Metric::SynergyRatio => {
-                let fused_bst = fused.bst() as f32;
-                let avg_parent =
-                    (head_sp.base_stats.bst() as f32 + body_sp.base_stats.bst() as f32) / 2.0;
-                fused_bst / avg_parent // every species has BST > 0, so no divide-by-zero
+                let avg_parent = (ctx.raw_size[h] + ctx.raw_size[b]) / 2.0;
+                if avg_parent == 0.0 {
+                    0.0
+                } else {
+                    raw(&fused) / avg_parent
+                }
             }
-            Metric::SurplusOverBest => {
-                let best_parent = head_sp.base_stats.bst().max(body_sp.base_stats.bst()) as f32;
-                fused.bst() as f32 - best_parent
+            Metric::SurplusOverBest => raw(&fused) - ctx.raw_size[h].max(ctx.raw_size[b]),
+            Metric::BalancedSynergy => {
+                let f = normalized(&fused);
+                (f - ctx.norm_size[h]) + (f - ctx.norm_size[b])
             }
             Metric::PhysicalEHp => phys_ehp,
             Metric::SpecialEHp => spec_ehp,
@@ -558,13 +640,14 @@ pub fn order_matches(
     matches: RoaringBitmap,
     metric: Option<Metric>,
     secondary: Option<Metric>,
-) -> Vec<u32> {
+    synergy_stats: StatMask,
+) -> Box<[u32]> {
     let Some(primary) = metric else {
         // RoaringBitmap iterates ascending, which is exactly dex order
         return matches.iter().collect();
     };
     let n = dex.species().len() as u32;
-    let ctx = MetricContext::new(dex); // calibrate the speed tiering curve
+    let ctx = MetricContext::new(dex, synergy_stats); // distribution-derived calibration, once
 
     // one f32 key per fusion: the metric itself, or the metric/secondary ratio
     let mut keyed: Vec<(f32, u32)> = matches
@@ -578,6 +661,7 @@ pub fn order_matches(
             (key, id)
         })
         .collect();
+
     keyed.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
     keyed.into_iter().map(|(_, id)| id).collect()
 }
@@ -585,15 +669,19 @@ pub fn order_matches(
 #[cfg(test)]
 mod test {
     use roaring::RoaringBitmap;
+    use strum::VariantArray;
 
     use super::{
         DefenseFilter, DefenseRelation, EvolutionFilter, Filters, HasAbility, HasMove, HasPokemon,
-        Metric, StatRange, StatRanges, ability_filter::AbilitySource, move_filter::MoveSource,
-        order_matches, separable_filter, stat_filter::FusedStat,
+        Metric, StatMask, StatRange, StatRanges, ability_filter::AbilitySource,
+        move_filter::MoveSource, order_matches, separable_filter, stat_filter::FusedStat,
         stat_filter::StatRange as TaggedRange,
     };
     use crate::{
-        infinite_fusion::{Dex, DexId, GameVersion, InfiniteFusionDex, species::SpeciesId},
+        infinite_fusion::{
+            Dex, DexId, GameVersion, InfiniteFusionDex,
+            species::{SpeciesId, base_stats::Stat},
+        },
         test::infinite_fusion_dir,
     };
 
@@ -801,7 +889,13 @@ mod test {
         }
         .apply(&dex);
 
-        let ordered = order_matches(&dex, matches.clone(), Some(Metric::Bst), None);
+        let ordered = order_matches(
+            &dex,
+            matches.clone(),
+            Some(Metric::Bst),
+            None,
+            StatMask::ALL,
+        );
         // same set, just reordered
         assert_eq!(ordered.len(), matches.len() as usize);
         assert_eq!(ordered.iter().copied().collect::<RoaringBitmap>(), matches);
@@ -821,7 +915,7 @@ mod test {
         assert!(ordered.windows(2).all(|w| bst(w[0]) <= bst(w[1])));
         // no metric (dex order): strictly ascending id order
         assert!(
-            order_matches(&dex, matches.clone(), None, None)
+            order_matches(&dex, matches.clone(), None, None, StatMask::ALL)
                 .windows(2)
                 .all(|w| w[0] < w[1])
         );
@@ -894,7 +988,13 @@ mod test {
             (u64::from(fused.atk()), u64::from(fused.def()))
         };
 
-        let asc = order_matches(&dex, matches.clone(), Some(Metric::Atk), Some(Metric::Def));
+        let asc = order_matches(
+            &dex,
+            matches.clone(),
+            Some(Metric::Atk),
+            Some(Metric::Def),
+            StatMask::ALL,
+        );
         // same set, just reordered
         assert_eq!(asc.iter().copied().collect::<RoaringBitmap>(), matches);
         // ascending: non-decreasing atk/def ratio (a/b <= c/d  <=>  a*d <= c*b), checked against an
@@ -938,7 +1038,13 @@ mod test {
             super::harmonic_mean(hp * f32::from(fused.def()), hp * f32::from(fused.spd()))
         };
 
-        let asc = order_matches(&dex, matches.clone(), Some(Metric::CombinedEHp), None);
+        let asc = order_matches(
+            &dex,
+            matches.clone(),
+            Some(Metric::CombinedEHp),
+            None,
+            StatMask::ALL,
+        );
         // same set, just reordered, ordered by non-decreasing combined eHP
         assert_eq!(asc.iter().copied().collect::<RoaringBitmap>(), matches);
         assert!(
@@ -1002,11 +1108,23 @@ mod test {
             super::harmonic_mean(a, s) * sf
         };
 
-        let asc = order_matches(&dex, matches.clone(), Some(Metric::CombinedSweep), None);
+        let asc = order_matches(
+            &dex,
+            matches.clone(),
+            Some(Metric::CombinedSweep),
+            None,
+            StatMask::ALL,
+        );
         assert_eq!(asc.iter().copied().collect::<RoaringBitmap>(), matches);
         assert!(asc.windows(2).all(|w| combined(w[0]) <= combined(w[1])));
 
-        let asc_mixed = order_matches(&dex, matches.clone(), Some(Metric::MixedSweep), None);
+        let asc_mixed = order_matches(
+            &dex,
+            matches.clone(),
+            Some(Metric::MixedSweep),
+            None,
+            StatMask::ALL,
+        );
         assert!(asc_mixed.windows(2).all(|w| mixed(w[0]) <= mixed(w[1])));
     }
 
@@ -1057,7 +1175,13 @@ mod test {
             ehp * td.factor(t1, t2)
         };
 
-        let asc = order_matches(&dex, matches.clone(), Some(Metric::TACombinedEHp), None);
+        let asc = order_matches(
+            &dex,
+            matches.clone(),
+            Some(Metric::TACombinedEHp),
+            None,
+            StatMask::ALL,
+        );
         // same set, just reordered, ordered by non-decreasing type-scaled bulk
         assert_eq!(asc.iter().copied().collect::<RoaringBitmap>(), matches);
         assert!(
@@ -1103,18 +1227,138 @@ mod test {
             f - h.max(b)
         };
 
-        let asc_ratio = order_matches(&dex, matches.clone(), Some(Metric::SynergyRatio), None);
+        let asc_ratio = order_matches(
+            &dex,
+            matches.clone(),
+            Some(Metric::SynergyRatio),
+            None,
+            StatMask::ALL,
+        );
         assert_eq!(
             asc_ratio.iter().copied().collect::<RoaringBitmap>(),
             matches
         );
         assert!(asc_ratio.windows(2).all(|w| ratio(w[0]) <= ratio(w[1])));
 
-        let asc_best = order_matches(&dex, matches.clone(), Some(Metric::SurplusOverBest), None);
+        let asc_best = order_matches(
+            &dex,
+            matches.clone(),
+            Some(Metric::SurplusOverBest),
+            None,
+            StatMask::ALL,
+        );
         assert!(
             asc_best
                 .windows(2)
                 .all(|w| surplus_over_best(w[0]) <= surplus_over_best(w[1]))
         );
+    }
+
+    #[test]
+    fn synergy_stat_mask_excludes_chosen_stats() {
+        let dex = InfiniteFusionDex::from_path(infinite_fusion_dir(), GameVersion::Kanto).unwrap();
+        let n = dex.species().len() as u32;
+        let bulbasaur = dex.species().get_id_of("BULBASAUR").unwrap();
+        let matches = Filters {
+            has_pokemon: Some(HasPokemon::Either(bulbasaur)),
+            ..Default::default()
+        }
+        .apply(&dex);
+
+        // SumOfParts with every stat but Sp. Atk: oracle sums the five included stats per side
+        let included = [Stat::Hp, Stat::Atk, Stat::Def, Stat::Spd, Stat::Spe];
+        let partial =
+            |s: &super::BaseStats| -> f32 { included.iter().map(|&st| f32::from(s.get(st))).sum() };
+        let sum_of_parts = |id: u32| {
+            let head = dex
+                .species()
+                .get_item(SpeciesId::from_u32(id / n))
+                .base_stats;
+            let body = dex
+                .species()
+                .get_item(SpeciesId::from_u32(id % n))
+                .base_stats;
+            let f = partial(&head.fuse(&body));
+            (f - partial(&head)) + (f - partial(&body))
+        };
+
+        let asc = order_matches(
+            &dex,
+            matches.clone(),
+            Some(Metric::SumOfParts),
+            None,
+            StatMask::from_stats(&included),
+        );
+        assert_eq!(asc.iter().copied().collect::<RoaringBitmap>(), matches);
+        assert!(
+            asc.windows(2)
+                .all(|w| sum_of_parts(w[0]) <= sum_of_parts(w[1]))
+        );
+        // an empty selection falls back to all stats
+        assert!(matches!(StatMask::from_stats(&[]).0, 0b0011_1111));
+    }
+
+    #[test]
+    fn balanced_synergy_orders_by_normalized_surplus() {
+        let dex = InfiniteFusionDex::from_path(infinite_fusion_dir(), GameVersion::Kanto).unwrap();
+        let n = dex.species().len() as u32;
+        let bulbasaur = dex.species().get_id_of("BULBASAUR").unwrap();
+        let dist = dex.species().stat_distributions();
+        let matches = Filters {
+            has_pokemon: Some(HasPokemon::Either(bulbasaur)),
+            ..Default::default()
+        }
+        .apply(&dex);
+
+        let norm = |s: &super::BaseStats| -> f32 {
+            Stat::VARIANTS
+                .iter()
+                .map(|&st| dist.rank(st, s.get(st)))
+                .sum()
+        };
+        let balanced = |id: u32| {
+            let head = dex
+                .species()
+                .get_item(SpeciesId::from_u32(id / n))
+                .base_stats;
+            let body = dex
+                .species()
+                .get_item(SpeciesId::from_u32(id % n))
+                .base_stats;
+            let f = norm(&head.fuse(&body));
+            (f - norm(&head)) + (f - norm(&body))
+        };
+
+        let asc = order_matches(
+            &dex,
+            matches.clone(),
+            Some(Metric::BalancedSynergy),
+            None,
+            StatMask::ALL,
+        );
+        assert_eq!(asc.iter().copied().collect::<RoaringBitmap>(), matches);
+        assert!(asc.windows(2).all(|w| balanced(w[0]) <= balanced(w[1])));
+    }
+
+    #[test]
+    fn ignored_species_drops_fusions_on_either_side() {
+        let dex = InfiniteFusionDex::from_path(infinite_fusion_dir(), GameVersion::Kanto).unwrap();
+        let n = dex.species().len() as u32;
+        let pikachu = dex.species().get_id_of("PIKACHU").unwrap();
+
+        let kept = Filters {
+            ignored_species: Box::from([pikachu]),
+            ..Default::default()
+        }
+        .apply(&dex);
+
+        // no surviving fusion has Pikachu on either side
+        assert!(
+            kept.iter()
+                .all(|id| id / n != pikachu.to_u32() && id % n != pikachu.to_u32())
+        );
+        // and it really did remove some (every Pikachu row + column, minus the double-counted cell)
+        let all = Filters::default().apply(&dex);
+        assert_eq!(all.len() - kept.len(), 2 * u64::from(n) - 1);
     }
 }
