@@ -52,6 +52,18 @@
     Exclude legendaries
   </label>
 
+  <label class="mb-3 flex items-center gap-2 text-sm">
+    Evolution
+    <select
+      class="ml-auto rounded border border-gray-700 bg-gray-800 p-1 text-xs text-gray-200"
+      bind:value={filters.evolution}
+    >
+      <option value={null}>Any</option>
+      <option value="CanEvolve">Can still evolve</option>
+      <option value="FullyEvolved">Fully evolved</option>
+    </select>
+  </label>
+
   <fieldset class="mb-3 rounded-md border border-gray-800 p-2">
     <legend class="px-1 text-sm font-semibold text-gray-300">Types</legend>
     <TypePicker

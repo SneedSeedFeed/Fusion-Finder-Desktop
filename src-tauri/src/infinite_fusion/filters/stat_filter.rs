@@ -132,7 +132,10 @@ impl StatIndex {
             (3 * lo - 2 * hv, 3 * hi + 2 - 2 * hv)
         } else {
             // fused = floor((2*b + hv) / 3); ceil(x/2) == (x + 1).div_euclid(2)
-            ((3 * lo - hv + 1).div_euclid(2), (3 * hi + 2 - hv).div_euclid(2))
+            (
+                (3 * lo - hv + 1).div_euclid(2),
+                (3 * hi + 2 - hv).div_euclid(2),
+            )
         };
 
         let body_lo = body_lo.max(0);

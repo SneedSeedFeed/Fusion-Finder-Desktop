@@ -17,7 +17,7 @@ use crate::infinite_fusion::{
     GameVersion, InfiniteFusionDex,
     area::AreaEncounter,
     bootstrap::Bootstrap,
-    filters::{Filters, SortBy, SortOrder},
+    filters::{Filters, Metric, order_matches},
     inspect::{FusionDetail, FusionName},
     species::{SpeciesId, name_halves::NameMap},
     types::TypeId,
@@ -74,22 +74,17 @@ fn fusion_detail(
     Ok(detail)
 }
 
-/// Run a filter set, returning the matching fusion ids (`head * species_count + body`) ordered by `sort`
+/// Run a filter set, returning the matching fusion ids (`head * species_count + body`) ordered ascending by `metric`, or by the `metric / metric2` ratio when both are given
 #[tauri::command]
 fn search(
     state: State<'_, AppState>,
     filters: Filters,
-    sort: SortBy,
-    descending: bool,
+    metric: Option<Metric>,
+    metric2: Option<Metric>,
 ) -> Result<Vec<u32>, String> {
-    let sort_order = if descending {
-        SortOrder::Descending
-    } else {
-        SortOrder::Ascending
-    };
     let guard = state.0.read().unwrap();
     let dex = &guard.as_ref().ok_or("no game loaded")?.dex;
-    Ok(sort.order(dex, filters.apply(dex), sort_order))
+    Ok(order_matches(dex, filters.apply(dex), metric, metric2))
 }
 
 /// The display name + type ids for a fusion, keyed by its encoded id so the caller can match results back to the grid cells that asked, even if the window has since scrolled.

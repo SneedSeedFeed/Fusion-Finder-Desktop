@@ -37,6 +37,22 @@
     }
   });
 
+  // Reconcile melt's selection when `value` is changed externally (clear all)
+  // A pick is a no-op here: melt's `selected` already matches `value` by the time this runs.
+  $effect(() => {
+    if ((value ?? null) === ($selected?.value ?? null)) return;
+    if (value == null) {
+      selected.set(undefined);
+      inputValue.set("");
+    } else {
+      const item = items.find((i) => i.id === value);
+      if (item) {
+        selected.set({ value: item.id, label: item.name });
+        inputValue.set(item.name);
+      }
+    }
+  });
+
   function clear() {
     selected.set(undefined);
     inputValue.set("");

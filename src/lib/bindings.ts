@@ -196,9 +196,8 @@ export interface FusionDetail {
 export const STATS = ["hp", "atk", "def", "spa", "spd", "spe", "bst"] as const;
 export type StatKey = (typeof STATS)[number];
 
-// matches the backend SortBy enum (variant names)
-export const SORTS = [
-  { value: "DexNumber", label: "Dex order" },
+// matches the backend Metric enum (variant names)
+export const METRICS = [
   { value: "Bst", label: "BST" },
   { value: "Hp", label: "HP" },
   { value: "Atk", label: "Attack" },
@@ -206,8 +205,14 @@ export const SORTS = [
   { value: "Spa", label: "Sp. Atk" },
   { value: "Spd", label: "Sp. Def" },
   { value: "Spe", label: "Speed" },
+  { value: "PhysicalEhp", label: "Physical eHP" },
+  { value: "SpecialEhp", label: "Special eHP" },
+  { value: "CombinedEhp", label: "Combined eHP" },
 ] as const;
-export type SortBy = (typeof SORTS)[number]["value"];
+export type Metric = (typeof METRICS)[number]["value"];
+
+// matches the backend EvolutionFilter enum (variant names); null = no evolution constraint
+export type EvolutionFilter = "CanEvolve" | "FullyEvolved";
 
 // ability-relevant move flags (must match the backend's ABILITY_MOVE_FLAGS labels)
 export const MOVE_FLAGS = [

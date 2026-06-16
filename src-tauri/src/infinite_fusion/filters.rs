@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::infinite_fusion::{
     Dex, DexId, InfiniteFusionDex, abilities::AbilityId, filters::type_filter::fused_types,
-    moves::MoveId, species::SpeciesId, types::TypeDex, types::TypeId,
+    moves::MoveId, species::SpeciesDetails, species::SpeciesId, types::TypeDex, types::TypeId,
 };
 
 /// Intersect `set` into a running per-head body set, where `None` means "all bodies so far".
@@ -64,6 +64,18 @@ pub struct Filters {
     /// drop any fusion with a legendary on either side (per `LEGENDARIES_LIST`)
     #[serde(default)]
     pub exclude_legendaries: bool,
+    /// keep only fusions that can still evolve, or only fully-evolved ones (see `EvolutionFilter`)
+    #[serde(default)]
+    pub evolution: Option<EvolutionFilter>,
+}
+
+/// Constrain a fusion by whether it can still evolve. A fusion evolves when *either* component has a
+/// forward evolution, so `CanEvolve` keeps a fusion if head **or** body can evolve, while
+/// `FullyEvolved` keeps it only when **neither** can.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+pub enum EvolutionFilter {
+    CanEvolve,
+    FullyEvolved,
 }
 
 impl Filters {
@@ -91,6 +103,25 @@ impl Filters {
                     .collect()
             });
 
+        // species (by index) on the qualifying side of the evolution filter: the still-evolving
+        // ones for `CanEvolve`, the fully-evolved ones for `FullyEvolved`. The per-head logic below
+        // applies OR vs AND semantics; this set already encodes which membership we're testing for.
+        let evo_species: Option<RoaringBitmap> = self.evolution.map(|evo| {
+            let can_evolve = |s: &SpeciesDetails| s.evolutions.iter().any(|e| e.target().is_into());
+            dex.species()
+                .map()
+                .values()
+                .enumerate()
+                .filter_map(|(i, s)| {
+                    let keep = match evo {
+                        EvolutionFilter::CanEvolve => can_evolve(s),
+                        EvolutionFilter::FullyEvolved => !can_evolve(s),
+                    };
+                    keep.then_some(i as u32)
+                })
+                .collect()
+        });
+
         for head_id in 0..n {
             let head = SpeciesId::from_usize(head_id);
             let mut bodies: Option<RoaringBitmap> = None;
@@ -117,6 +148,25 @@ impl Filters {
                         if head != p {
                             and_in(&mut bodies, single(p));
                         }
+                    }
+                }
+            }
+            if let (Some(evo), Some(set)) = (self.evolution, &evo_species) {
+                let head_qualifies = set.contains(head_id as u32);
+                match evo {
+                    // can-evolve: head OR body can evolve -> an evolving head frees all bodies,
+                    // otherwise the body must be the one that can evolve.
+                    EvolutionFilter::CanEvolve => {
+                        if !head_qualifies {
+                            and_in(&mut bodies, set.clone());
+                        }
+                    }
+                    // fully-evolved: head AND body must both be fully evolved.
+                    EvolutionFilter::FullyEvolved => {
+                        if !head_qualifies {
+                            continue;
+                        }
+                        and_in(&mut bodies, set.clone());
                     }
                 }
             }
@@ -290,10 +340,9 @@ pub struct StatRange<T> {
     pub max: T,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
-pub enum SortBy {
-    #[default]
-    DexNumber,
+/// A single sortable quantity derived from a fusion
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+pub enum Metric {
     Hp,
     Atk,
     Def,
@@ -301,73 +350,77 @@ pub enum SortBy {
     Spd,
     Spe,
     Bst,
+    // effective health metrics
+    PhysicalEhp,
+    SpecialEhp,
+    /// harmonic mean of Physical and Special effective health to reward generally bulky pokemon
+    CombinedEhp,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
-pub enum SortOrder {
-    #[default]
-    Ascending,
-    Descending,
+/// Harmonic mean of two values. Pulled toward the smaller of the two, so a lopsided pair scores far
+/// below a balanced one — the point of "combined" bulk.
+fn harmonic_mean(a: f32, b: f32) -> f32 {
+    let sum = a + b;
+    if sum == 0.0 {
+        return 0.0;
+    }
+    2.0 * a * b / sum
 }
 
-impl SortOrder {
-    pub fn is_descending(self) -> bool {
-        self == SortOrder::Descending
-    }
-
-    pub fn is_ascending(self) -> bool {
-        self == SortOrder::Ascending
-    }
-}
-
-impl SortBy {
-    /// Order the matching fusion ids. `DexNumber` uses the fusion id itself; any stat uses the
-    /// *fused* value. `descending` flips the order; ties always fall back to ascending id.
-    pub fn order(
-        self,
-        dex: &InfiniteFusionDex,
-        matches: RoaringBitmap,
-        order: SortOrder,
-    ) -> Vec<u32> {
-        if self == SortBy::DexNumber {
-            // RoaringBitmap iterates ascending
-            let mut ids: Vec<u32> = matches.iter().collect();
-            if order.is_descending() {
-                ids.reverse();
-            }
-            return ids;
-        }
-        let n = dex.species().len() as u32;
-        let mut keyed: Vec<(u16, u32)> = matches
-            .iter()
-            .map(|id| (self.fused_stat(dex, id / n, id % n), id))
-            .collect();
-        keyed.sort_by(|a, b| {
-            let by_stat = if order.is_descending() {
-                b.0.cmp(&a.0)
-            } else {
-                a.0.cmp(&b.0)
-            };
-            by_stat.then(a.1.cmp(&b.1))
-        });
-        keyed.into_iter().map(|(_, id)| id).collect()
-    }
-
-    fn fused_stat(self, dex: &InfiniteFusionDex, head: u32, body: u32) -> u16 {
+impl Metric {
+    fn fused_value(self, dex: &InfiniteFusionDex, head: u32, body: u32) -> f32 {
         let head = dex.species().get_item(SpeciesId::from_u32(head)).base_stats;
         let body = dex.species().get_item(SpeciesId::from_u32(body)).base_stats;
         let fused = head.fuse(&body);
+        let hp = f32::from(fused.hp());
         match self {
-            SortBy::Hp => fused.hp().into(),
-            SortBy::Atk => fused.atk().into(),
-            SortBy::Def => fused.def().into(),
-            SortBy::Spa => fused.spa().into(),
-            SortBy::Spd => fused.spd().into(),
-            SortBy::Spe => fused.spe().into(),
-            SortBy::Bst => fused.bst(),
-            SortBy::DexNumber => 0,
+            Metric::Hp => hp,
+            Metric::Atk => fused.atk().into(),
+            Metric::Def => fused.def().into(),
+            Metric::Spa => fused.spa().into(),
+            Metric::Spd => fused.spd().into(),
+            Metric::Spe => fused.spe().into(),
+            Metric::Bst => fused.bst().into(),
+            Metric::PhysicalEhp => hp * f32::from(fused.def()),
+            Metric::SpecialEhp => hp * f32::from(fused.spd()),
+            Metric::CombinedEhp => {
+                harmonic_mean(hp * f32::from(fused.def()), hp * f32::from(fused.spd()))
+            }
         }
     }
+}
+
+/// Order the matching fusion ids ascending. Direction is handled on the front to avoid re-computing searches.
+///
+/// * `metric == None` -> dex order (technically species load order)
+/// * `metric == Some(m)`, `secondary == None` -> by the fused value of `m`.
+/// * `metric == Some(m)`, `secondary == Some(d)` -> by the ratio `m / d`
+pub fn order_matches(
+    dex: &InfiniteFusionDex,
+    matches: RoaringBitmap,
+    metric: Option<Metric>,
+    secondary: Option<Metric>,
+) -> Vec<u32> {
+    let Some(primary) = metric else {
+        // RoaringBitmap iterates ascending, which is exactly dex order
+        return matches.iter().collect();
+    };
+    let n = dex.species().len() as u32;
+
+    // one f32 key per fusion: the metric itself, or the metric/secondary ratio
+    let mut keyed: Vec<(f32, u32)> = matches
+        .iter()
+        .map(|id| {
+            let value = primary.fused_value(dex, id / n, id % n);
+            let key = match secondary {
+                Some(denom) => value / denom.fused_value(dex, id / n, id % n),
+                None => value,
+            };
+            (key, id)
+        })
+        .collect();
+    keyed.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    keyed.into_iter().map(|(_, id)| id).collect()
 }
 
 #[cfg(test)]
@@ -375,14 +428,13 @@ mod test {
     use roaring::RoaringBitmap;
 
     use super::{
-        DefenseFilter, DefenseRelation, Filters, HasAbility, HasMove, HasPokemon, SortBy,
-        StatRange, StatRanges, ability_filter::AbilitySource, move_filter::MoveSource,
-        separable_filter, stat_filter::FusedStat, stat_filter::StatRange as TaggedRange,
+        DefenseFilter, DefenseRelation, EvolutionFilter, Filters, HasAbility, HasMove, HasPokemon,
+        Metric, StatRange, StatRanges, ability_filter::AbilitySource, move_filter::MoveSource,
+        order_matches, separable_filter, stat_filter::FusedStat,
+        stat_filter::StatRange as TaggedRange,
     };
     use crate::{
-        infinite_fusion::{
-            Dex, DexId, GameVersion, InfiniteFusionDex, filters::SortOrder, species::SpeciesId,
-        },
+        infinite_fusion::{Dex, DexId, GameVersion, InfiniteFusionDex, species::SpeciesId},
         test::infinite_fusion_dir,
     };
 
@@ -579,7 +631,7 @@ mod test {
     }
 
     #[test]
-    fn sort_by_stat_is_descending_and_lossless() {
+    fn sort_by_stat_orders_correctly_and_preserves_the_set() {
         let dex = InfiniteFusionDex::from_path(infinite_fusion_dir(), GameVersion::Kanto).unwrap();
         let n = dex.species().len() as u32;
         let bulbasaur = dex.species().get_id_of("BULBASAUR").unwrap();
@@ -590,7 +642,7 @@ mod test {
         }
         .apply(&dex);
 
-        let ordered = SortBy::Bst.order(&dex, matches.clone(), SortOrder::Descending);
+        let ordered = order_matches(&dex, matches.clone(), Some(Metric::Bst), None);
         // same set, just reordered
         assert_eq!(ordered.len(), matches.len() as usize);
         assert_eq!(ordered.iter().copied().collect::<RoaringBitmap>(), matches);
@@ -606,23 +658,133 @@ mod test {
                 .base_stats;
             head.fuse(&body).bst()
         };
-        // descending: non-increasing fused BST
-        assert!(ordered.windows(2).all(|w| bst(w[0]) >= bst(w[1])));
-        // ascending: non-decreasing fused BST
-        let asc = SortBy::Bst.order(&dex, matches.clone(), SortOrder::Ascending);
-        assert!(asc.windows(2).all(|w| bst(w[0]) <= bst(w[1])));
-        // DexNumber: ascending vs descending id order
+        // ascending: non-decreasing fused BST (the frontend reverses this for descending)
+        assert!(ordered.windows(2).all(|w| bst(w[0]) <= bst(w[1])));
+        // no metric (dex order): strictly ascending id order
         assert!(
-            SortBy::DexNumber
-                .order(&dex, matches.clone(), SortOrder::Ascending)
+            order_matches(&dex, matches.clone(), None, None)
                 .windows(2)
                 .all(|w| w[0] < w[1])
         );
+    }
+
+    #[test]
+    fn evolution_filter_partitions_into_can_and_cannot_evolve() {
+        let dex = InfiniteFusionDex::from_path(infinite_fusion_dir(), GameVersion::Kanto).unwrap();
+        let n = dex.species().len() as u32;
+        let can_evolve = |idx: u32| {
+            dex.species()
+                .get_item(SpeciesId::from_u32(idx))
+                .evolutions
+                .iter()
+                .any(|e| e.target().is_into())
+        };
+
+        let can = Filters {
+            evolution: Some(EvolutionFilter::CanEvolve),
+            ..Default::default()
+        }
+        .apply(&dex);
+        // every kept fusion has at least one evolving component
         assert!(
-            SortBy::DexNumber
-                .order(&dex, matches, SortOrder::Descending)
-                .windows(2)
-                .all(|w| w[0] > w[1])
+            can.iter()
+                .all(|id| can_evolve(id / n) || can_evolve(id % n))
+        );
+
+        let cannot = Filters {
+            evolution: Some(EvolutionFilter::FullyEvolved),
+            ..Default::default()
+        }
+        .apply(&dex);
+        // every kept fusion has no evolving component
+        assert!(
+            cannot
+                .iter()
+                .all(|id| !can_evolve(id / n) && !can_evolve(id % n))
+        );
+
+        // the two are a disjoint, exhaustive partition of the unfiltered set
+        let all = Filters::default().apply(&dex);
+        assert!((can.clone() & cannot.clone()).is_empty());
+        assert_eq!(can.len() + cannot.len(), all.len());
+    }
+
+    #[test]
+    fn sort_by_ratio_orders_by_metric_quotient() {
+        let dex = InfiniteFusionDex::from_path(infinite_fusion_dir(), GameVersion::Kanto).unwrap();
+        let n = dex.species().len() as u32;
+        let bulbasaur = dex.species().get_id_of("BULBASAUR").unwrap();
+
+        let matches = Filters {
+            has_pokemon: Some(HasPokemon::Either(bulbasaur)),
+            ..Default::default()
+        }
+        .apply(&dex);
+
+        // atk-to-def ratio of a fusion, as an exact rational compared via cross-multiplication
+        let ratio = |id: u32| {
+            let head = dex
+                .species()
+                .get_item(SpeciesId::from_u32(id / n))
+                .base_stats;
+            let body = dex
+                .species()
+                .get_item(SpeciesId::from_u32(id % n))
+                .base_stats;
+            let fused = head.fuse(&body);
+            (u64::from(fused.atk()), u64::from(fused.def()))
+        };
+
+        let asc = order_matches(&dex, matches.clone(), Some(Metric::Atk), Some(Metric::Def));
+        // same set, just reordered
+        assert_eq!(asc.iter().copied().collect::<RoaringBitmap>(), matches);
+        // ascending: non-decreasing atk/def ratio (a/b <= c/d  <=>  a*d <= c*b), checked against an
+        // exact integer cross-multiplication oracle to confirm the f32 keys don't flip the order
+        assert!(asc.windows(2).all(|w| {
+            let (an, ad) = ratio(w[0]);
+            let (bn, bd) = ratio(w[1]);
+            an * bd <= bn * ad
+        }));
+    }
+
+    #[test]
+    fn combined_ehp_sorts_by_harmonic_bulk_and_punishes_lopsidedness() {
+        // harmonic mean of equal sides is the side; of a lopsided pair it sits near the smaller.
+        assert_eq!(super::harmonic_mean(100.0, 100.0), 100.0);
+        assert_eq!(super::harmonic_mean(0.0, 0.0), 0.0);
+        assert!(super::harmonic_mean(10.0, 1000.0) < super::harmonic_mean(100.0, 100.0)); // ~19.8 < 100
+        assert_eq!(super::harmonic_mean(0.0, 1000.0), 0.0); // a paper side tanks the whole score
+
+        let dex = InfiniteFusionDex::from_path(infinite_fusion_dir(), GameVersion::Kanto).unwrap();
+        let n = dex.species().len() as u32;
+        let bulbasaur = dex.species().get_id_of("BULBASAUR").unwrap();
+
+        let matches = Filters {
+            has_pokemon: Some(HasPokemon::Either(bulbasaur)),
+            ..Default::default()
+        }
+        .apply(&dex);
+
+        let combined_ehp = |id: u32| {
+            let head = dex
+                .species()
+                .get_item(SpeciesId::from_u32(id / n))
+                .base_stats;
+            let body = dex
+                .species()
+                .get_item(SpeciesId::from_u32(id % n))
+                .base_stats;
+            let fused = head.fuse(&body);
+            let hp = f32::from(fused.hp());
+            super::harmonic_mean(hp * f32::from(fused.def()), hp * f32::from(fused.spd()))
+        };
+
+        let asc = order_matches(&dex, matches.clone(), Some(Metric::CombinedEhp), None);
+        // same set, just reordered, ordered by non-decreasing combined eHP
+        assert_eq!(asc.iter().copied().collect::<RoaringBitmap>(), matches);
+        assert!(
+            asc.windows(2)
+                .all(|w| combined_ehp(w[0]) <= combined_ehp(w[1]))
         );
     }
 }

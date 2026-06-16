@@ -1,6 +1,6 @@
 [package]
 name = "fusion-finder-desktop"
-version = "0.1.1"
+version = "0.1.2"
 description = "A desktop companion app for Pokémon Infinite Fusion"
 authors = ["Adam Stopher <adam.stopher@protonmail.com>"]
 edition = "2024"

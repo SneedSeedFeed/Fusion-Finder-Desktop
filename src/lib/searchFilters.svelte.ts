@@ -1,4 +1,4 @@
-import type { Bootstrap, Range, StatKey } from "$lib/bindings";
+import type { Bootstrap, EvolutionFilter, Range, StatKey } from "$lib/bindings";
 import { STATS } from "$lib/bindings";
 
 // All filter inputs for the search, plus the small mutators and the conversions to/from the
@@ -25,6 +25,7 @@ export class FilterState {
   moveFlagFilter = $state<string[]>([]);
   hasCustomSprite = $state(false);
   excludeLegendaries = $state(false);
+  evolution = $state<EvolutionFilter | null>(null);
   // hidden, game-set: caps fusable species to the real dex (Kanto's data has unfusable Gen-3 mons)
   blockIdsAbove = $state<number | null>(null);
   // per-stat slider position as [min, max]; a stat only constrains the search when its range is
@@ -69,6 +70,7 @@ export class FilterState {
     this.moveEgg = true;
     this.hasCustomSprite = false;
     this.excludeLegendaries = false;
+    this.evolution = null;
     this.blockIdsAbove = options.block_ids_above;
     this.statRange = Object.fromEntries(
       STATS.map((s) => [
@@ -102,6 +104,7 @@ export class FilterState {
     }
     if (this.hasCustomSprite) filters.has_custom_sprite = true;
     if (this.excludeLegendaries) filters.exclude_legendaries = true;
+    if (this.evolution !== null) filters.evolution = this.evolution;
     if (this.blockIdsAbove !== null)
       filters.block_ids_above = this.blockIdsAbove;
     // a stat is active only if its slider has moved off the full bounds; send the whole object

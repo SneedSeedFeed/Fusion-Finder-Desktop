@@ -8,7 +8,7 @@
   import ResultsGrid from "$lib/search/ResultsGrid.svelte";
   import FilterSidebar from "$lib/search/FilterSidebar.svelte";
   import { FilterState } from "$lib/searchFilters.svelte";
-  import type { Bootstrap, GameConfig, SortBy } from "$lib/bindings";
+  import type { Bootstrap, GameConfig, Metric } from "$lib/bindings";
 
   // undefined = still checking which game is loaded, null = no game (show setup), else loaded
   let config = $state<GameConfig | null | undefined>(undefined);
@@ -22,8 +22,14 @@
   let inspecting = $state<{ head: number; body: number } | null>(null);
   // whether the (non-blocking) area/route encounter panel is open
   let showAreas = $state(false);
-  let sortBy = $state<SortBy>("DexNumber");
+  // null metric = dex (order we load the data in) metric2 switches to ratio sorting.
+  let metric = $state<Metric | null>(null);
+  let metric2 = $state<Metric | null>(null);
   let sortDesc = $state(false);
+
+  // backend always returns the canonical ascending order sort direction is pure presentation, so descending is just this list read in reverse
+  // saves us re-computing the set just for flipping from asc to desc
+  let displayed = $derived(sortDesc ? results.toReversed() : results);
 
   // $state so it can be passed with `bind:` to FilterSidebar (which binds its sub-properties into
   // child components); the instance is never reassigned, only its reactive fields mutate.
@@ -31,15 +37,15 @@
 
   async function runSearch(
     payload: Record<string, unknown>,
-    sort: SortBy,
-    descending: boolean,
+    sortMetric: Metric | null,
+    ratioMetric: Metric | null,
   ) {
     searching = true;
     try {
       results = await invoke<number[]>("search", {
         filters: payload,
-        sort,
-        descending,
+        metric: sortMetric,
+        metric2: ratioMetric,
       });
     } catch (e) {
       error = String(e);
@@ -73,13 +79,16 @@
     if (config) loadDex();
   });
 
-  // live search: any filter/sort change schedules a (debounced) search, cancelling the previous one.
+  // live search: any filter/metric change schedules a (debounced) search, cancelling the previous one
   $effect(() => {
     if (!options) return;
     const payload = filters.build(options); // reads filter state -> registers deps
-    const sort = sortBy;
-    const desc = sortDesc;
-    const handle = setTimeout(() => runSearch(payload, sort, desc), 200);
+    const sortMetric = metric;
+    const ratioMetric = metric2;
+    const handle = setTimeout(
+      () => runSearch(payload, sortMetric, ratioMetric),
+      200,
+    );
     return () => clearTimeout(handle);
   });
 </script>
@@ -96,7 +105,9 @@
     onCancel={changingGame ? () => (changingGame = false) : undefined}
   />
 {:else}
-  <main class="flex h-screen overflow-hidden bg-[#0d1117] text-sm text-gray-200">
+  <main
+    class="flex h-screen overflow-hidden bg-[#0d1117] text-sm text-gray-200"
+  >
     {#if error}
       <p class="p-4 text-red-400">Couldn't load game data: {error}</p>
     {:else if !options}
@@ -106,13 +117,18 @@
         <ResultsToolbar
           count={results.length}
           {searching}
-          bind:sortBy
+          bind:metric
+          bind:metric2
           bind:sortDesc
           version={config.version}
           onChangeGame={() => (changingGame = true)}
           onOpenAreas={() => (showAreas = true)}
         />
-        <ResultsGrid {options} {results} onInspect={(f) => (inspecting = f)} />
+        <ResultsGrid
+          {options}
+          results={displayed}
+          onInspect={(f) => (inspecting = f)}
+        />
       </section>
 
       <FilterSidebar bind:filters {options} />

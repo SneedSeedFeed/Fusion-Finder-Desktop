@@ -8,11 +8,12 @@
     value = $bindable(),
   }: { min: number; max: number; step?: number; value: number[] } = $props();
 
-  // Uncontrolled: melt owns the value, seeded from the initial `value`, and pushes changes
-  // back up through `onValueChange`. Bounds are fixed for this slider's lifetime.
+  // melt owns the value, seeded from the initial `value`, and pushes drag changes back up through
+  // `onValueChange`. Bounds are fixed for this slider's lifetime.
   // svelte-ignore state_referenced_locally
   const {
     elements: { root, range, thumbs },
+    states: { value: meltValue },
   } = createSlider({
     defaultValue: value,
     min,
@@ -24,6 +25,13 @@
       }
       return next;
     },
+  });
+
+  // Push external `value` changes (e.g. the "Clear all" reset) back into melt so the thumbs move.
+  $effect(() => {
+    if (value[0] !== $meltValue[0] || value[1] !== $meltValue[1]) {
+      meltValue.set([...value]);
+    }
   });
 </script>
 
