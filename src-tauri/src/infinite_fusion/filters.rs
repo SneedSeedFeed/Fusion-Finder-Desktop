@@ -394,6 +394,11 @@ pub enum Metric {
     CombinedSweep,
     // the harmonic mean of both attacking sides scaled by speed (rewards mixed attackers like salamence)
     MixedSweep,
+    // sweep metrics adjusted by type coverage
+    TAPhysicalSweep,
+    TASpecialSweep,
+    TACombinedSweep,
+    TAMixedSweep,
 }
 
 /// Harmonic mean of two values. Pulled toward the smaller of the two, so a lopsided pair scores far below a balanced one
@@ -506,12 +511,63 @@ impl TypeDefense {
     }
 }
 
+/// Precomputed offensive multiplier for every typing: how well its STAB coverage fares against the field
+struct TypeOffense {
+    n_types: usize,
+    mono: Box<[f32]>, // indexed by t1
+    dual: Box<[f32]>, // indexed by t1 * n_types + t2 (symmetric, stored full for direct lookup)
+}
+
+impl TypeOffense {
+    fn build(types: &TypeDex) -> Self {
+        let n = types.len();
+        let defenders: Box<[TypeId]> = (0..n).map(TypeId::from_usize).collect();
+        let multiplier = |t1: TypeId, t2: Option<TypeId>| {
+            let total_quarters: u32 = defenders
+                .iter()
+                .map(|&d| {
+                    let q1 = type_factor(types, d, t1);
+                    match t2 {
+                        // best STAB against this defender
+                        Some(t2) => q1.max(type_factor(types, d, t2)),
+                        None => q1,
+                    }
+                })
+                .sum();
+            // 4 quarters per defender is neutral, so normalise so all-neutral coverage scores 1.0
+            total_quarters as f32 / (4 * n) as f32
+        };
+
+        let mono = defenders.iter().map(|&t1| multiplier(t1, None)).collect();
+        let mut dual = vec![0.0f32; n * n];
+        for t1 in 0..n {
+            for t2 in 0..n {
+                dual[t1 * n + t2] =
+                    multiplier(TypeId::from_usize(t1), Some(TypeId::from_usize(t2)));
+            }
+        }
+        Self {
+            n_types: n,
+            mono,
+            dual: dual.into_boxed_slice(),
+        }
+    }
+
+    fn factor(&self, t1: TypeId, t2: Option<TypeId>) -> f32 {
+        match t2 {
+            Some(t2) => self.dual[t1.to_usize() * self.n_types + t2.to_usize()],
+            None => self.mono[t1.to_usize()],
+        }
+    }
+}
+
 /// Per-search evaluation context for metrics: the dex plus any distribution-derived calibration,
 /// built once so the hot per-fusion loop stays O(1). Future metrics needing other distribution stats
 /// add fields here rather than recomputing per fusion.
 struct MetricContext<'a> {
     dex: &'a InfiniteFusionDex,
     type_defense: TypeDefense,
+    type_offense: TypeOffense,
     /// the synergy stats, expanded once so the per-fusion loop iterates only the included ones
     synergy_stats: Box<[Stat]>,
     raw_size: Box<[f32]>,
@@ -550,6 +606,7 @@ impl<'a> MetricContext<'a> {
         Self {
             dex,
             type_defense: TypeDefense::build(dex.types()),
+            type_offense: TypeOffense::build(dex.types()),
             synergy_stats,
             raw_size,
             norm_size,
@@ -574,6 +631,13 @@ impl Metric {
             let body_sp = dex.species().get_item(SpeciesId::from_u32(body));
             let (t1, t2) = fused_types(head_sp, body_sp, dex.types());
             ctx.type_defense.factor(t1, t2)
+        };
+        let type_offense = || {
+            let dex = ctx.dex;
+            let head_sp = dex.species().get_item(SpeciesId::from_u32(head));
+            let body_sp = dex.species().get_item(SpeciesId::from_u32(body));
+            let (t1, t2) = fused_types(head_sp, body_sp, dex.types());
+            ctx.type_offense.factor(t1, t2)
         };
         // synergy "size" of the fused stat block, summed over the selected stats only. `raw` is the
         // plain stat total (full mask == BST); `normalized` maps each stat onto its precomputed rank
@@ -626,6 +690,10 @@ impl Metric {
             Metric::SpecialSweep => spa * sweep_speed(),
             Metric::CombinedSweep => atk.max(spa) * sweep_speed(),
             Metric::MixedSweep => harmonic_mean(atk, spa) * sweep_speed(),
+            Metric::TAPhysicalSweep => atk * sweep_speed() * type_offense(),
+            Metric::TASpecialSweep => spa * sweep_speed() * type_offense(),
+            Metric::TACombinedSweep => atk.max(spa) * sweep_speed() * type_offense(),
+            Metric::TAMixedSweep => harmonic_mean(atk, spa) * sweep_speed() * type_offense(),
         }
     }
 }
@@ -1208,6 +1276,69 @@ mod test {
         assert!(
             asc.windows(2)
                 .all(|w| combined_bulk(w[0]) <= combined_bulk(w[1]))
+        );
+    }
+
+    #[test]
+    fn type_offense_rewards_strong_coverage() {
+        let dex = InfiniteFusionDex::from_path(infinite_fusion_dir(), GameVersion::Kanto).unwrap();
+        let to = super::TypeOffense::build(dex.types());
+        let ty = |key| dex.types().get_full_by_key(key).unwrap().0;
+        let (normal, fighting, flying) = (ty("NORMAL"), ty("FIGHTING"), ty("FLYING"));
+
+        // Normal has resists (Rock, Steel) and an immunity (Ghost) but nothing it hits super
+        // effectively, so its average STAB coverage sits below the 1.0 neutral baseline
+        assert!(to.factor(normal, None) < 1.0);
+        // Fighting hits five types super effectively, so it out-covers Normal
+        assert!(to.factor(fighting, None) > to.factor(normal, None));
+        // a second STAB can only add coverage (per-defender max), so it never lowers the score and
+        // Fighting's coverage strictly lifts mono-Normal
+        assert!(to.factor(normal, Some(fighting)) > to.factor(normal, None));
+        // the two slots are symmetric
+        assert_eq!(
+            to.factor(fighting, Some(flying)),
+            to.factor(flying, Some(fighting))
+        );
+    }
+
+    #[test]
+    fn ta_combined_sweep_scales_sweep_by_typing() {
+        let dex = InfiniteFusionDex::from_path(infinite_fusion_dir(), GameVersion::Kanto).unwrap();
+        let n = dex.species().len() as u32;
+        let bulbasaur = dex.species().get_id_of("BULBASAUR").unwrap();
+        let to = super::TypeOffense::build(dex.types());
+        let curve = super::SpeedCurve::from_speed(dex.species().stat_distributions());
+
+        let matches = Filters {
+            has_pokemon: Some(HasPokemon::Either(bulbasaur)),
+            ..Default::default()
+        }
+        .apply(&dex);
+
+        // CombinedSweep (best attacking side × speed) scaled by the typing's offensive coverage,
+        // recomputed independently of the metric code
+        let ta_combined_sweep = |id: u32| {
+            let head_sp = dex.species().get_item(SpeciesId::from_u32(id / n));
+            let body_sp = dex.species().get_item(SpeciesId::from_u32(id % n));
+            let fused = head_sp.base_stats.fuse(&body_sp.base_stats);
+            let sweep = f32::from(fused.atk()).max(f32::from(fused.spa()))
+                * curve.factor(f32::from(fused.spe()));
+            let (t1, t2) = super::fused_types(head_sp, body_sp, dex.types());
+            sweep * to.factor(t1, t2)
+        };
+
+        let asc = order_matches(
+            &dex,
+            matches.clone(),
+            Some(Metric::TACombinedSweep),
+            None,
+            StatMask::ALL,
+        );
+        // same set, just reordered, ordered by non-decreasing type-scaled sweep
+        assert_eq!(asc.iter().copied().collect::<RoaringBitmap>(), matches);
+        assert!(
+            asc.windows(2)
+                .all(|w| ta_combined_sweep(w[0]) <= ta_combined_sweep(w[1]))
         );
     }
 

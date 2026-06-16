@@ -245,6 +245,15 @@ export const METRIC_GROUPS = [
       { value: "MixedSweep", label: "Mixed Sweep" },
     ],
   },
+  {
+    label: "Type-adjusted Sweep",
+    metrics: [
+      { value: "TAPhysicalSweep", label: "TA Physical Sweep" },
+      { value: "TASpecialSweep", label: "TA Special Sweep" },
+      { value: "TACombinedSweep", label: "TA Combined Sweep" },
+      { value: "TAMixedSweep", label: "TA Mixed Sweep" },
+    ],
+  },
 ] as const;
 
 export type Metric = (typeof METRIC_GROUPS)[number]["metrics"][number]["value"];
