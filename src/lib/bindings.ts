@@ -196,24 +196,67 @@ export interface FusionDetail {
 export const STATS = ["hp", "atk", "def", "spa", "spd", "spe", "bst"] as const;
 export type StatKey = (typeof STATS)[number];
 
-// matches the backend Metric enum (variant names)
-export const METRICS = [
-  { value: "Bst", label: "BST" },
-  { value: "Hp", label: "HP" },
-  { value: "Atk", label: "Attack" },
-  { value: "Def", label: "Defense" },
-  { value: "Spa", label: "Sp. Atk" },
-  { value: "Spd", label: "Sp. Def" },
-  { value: "Spe", label: "Speed" },
-  { value: "PhysicalEhp", label: "Physical eHP" },
-  { value: "SpecialEhp", label: "Special eHP" },
-  { value: "CombinedEhp", label: "Combined eHP" },
-  { value: "PhysicalSweep", label: "Physical Sweep" },
-  { value: "SpecialSweep", label: "Special Sweep" },
-  { value: "CombinedSweep", label: "Combined Sweep" },
-  { value: "MixedSweep", label: "Mixed Sweep" },
+// matches the backend Metric enum (variant names), grouped into the categories the cascade sort menu shows
+// The backend keeps one flat `Metric` enum so this grouping is purely presentation
+export const METRIC_GROUPS = [
+  {
+    label: "Base stats",
+    metrics: [
+      { value: "Bst", label: "BST" },
+      { value: "Hp", label: "HP" },
+      { value: "Atk", label: "Attack" },
+      { value: "Def", label: "Defense" },
+      { value: "Spa", label: "Sp. Atk" },
+      { value: "Spd", label: "Sp. Def" },
+      { value: "Spe", label: "Speed" },
+    ],
+  },
+  {
+    label: "Synergy",
+    metrics: [
+      { value: "SumOfParts", label: "Sum of Parts" },
+      { value: "SynergyRatio", label: "Synergy Ratio" },
+      { value: "SurplusOverBest", label: "Surplus vs Best" },
+    ],
+  },
+  {
+    label: "Effective HP",
+    metrics: [
+      { value: "PhysicalEHp", label: "Physical eHP" },
+      { value: "SpecialEHp", label: "Special eHP" },
+      { value: "CombinedEHp", label: "Combined eHP" },
+    ],
+  },
+  {
+    label: "Type-adjusted eHP",
+    metrics: [
+      { value: "TAPhysicalEHp", label: "TA Physical eHP" },
+      { value: "TASpecialEHp", label: "TA Special eHP" },
+      { value: "TACombinedEHp", label: "TA Combined eHP" },
+    ],
+  },
+  {
+    label: "Sweep score",
+    metrics: [
+      { value: "PhysicalSweep", label: "Physical Sweep" },
+      { value: "SpecialSweep", label: "Special Sweep" },
+      { value: "CombinedSweep", label: "Combined Sweep" },
+      { value: "MixedSweep", label: "Mixed Sweep" },
+    ],
+  },
 ] as const;
-export type Metric = (typeof METRICS)[number]["value"];
+
+export type Metric = (typeof METRIC_GROUPS)[number]["metrics"][number]["value"];
+export type MetricOption = { value: Metric; label: string };
+export type MetricGroup = { label: string; metrics: readonly MetricOption[] };
+
+// flat view + label lookup, for callers that don't care about grouping
+export const METRICS: readonly MetricOption[] = METRIC_GROUPS.flatMap(
+  (g) => g.metrics as readonly MetricOption[],
+);
+export function metricLabel(value: Metric): string {
+  return METRICS.find((m) => m.value === value)?.label ?? value;
+}
 
 // matches the backend EvolutionFilter enum (variant names); null = no evolution constraint
 export type EvolutionFilter = "CanEvolve" | "FullyEvolved";

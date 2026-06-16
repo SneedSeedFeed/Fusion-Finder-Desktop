@@ -358,11 +358,24 @@ pub enum Metric {
     Spd,
     Spe,
     Bst,
+    // synergy: how much better is this fusion than the parents it's made from?
+    // additive surplus over both parents: (fused − head) + (fused − body)
+    // large negatives should offset large positives, so Caterpie + Necrozma doesn't top the list
+    SumOfParts,
+    // fused BST relative to the average parent BST (`1.0` = neutral)
+    // scale-free, leans toward hidden gems since a weak pair gaining 10% ranks with a strong pair gaining 10%
+    SynergyRatio,
+    // fused BST minus the stronger parent, positive only when the fusion outright beats both
+    SurplusOverBest,
     // effective health metrics
-    PhysicalEhp,
-    SpecialEhp,
-    /// harmonic mean of Physical and Special effective health to reward generally bulky pokemon
-    CombinedEhp,
+    PhysicalEHp,
+    SpecialEHp,
+    // harmonic mean of Physical and Special effective health to reward generally bulky pokemon
+    CombinedEHp,
+    // type adjusted effective health, scaled by the typing's defensive multipliers
+    TAPhysicalEHp,
+    TASpecialEHp,
+    TACombinedEHp,
     // sweep metrics: an attacking stat scaled by how usable its speed is
     PhysicalSweep,
     SpecialSweep,
@@ -372,8 +385,7 @@ pub enum Metric {
     MixedSweep,
 }
 
-/// Harmonic mean of two values. Pulled toward the smaller of the two, so a lopsided pair scores far
-/// below a balanced one — the point of "combined" bulk.
+/// Harmonic mean of two values. Pulled toward the smaller of the two, so a lopsided pair scores far below a balanced one
 fn harmonic_mean(a: f32, b: f32) -> f32 {
     let sum = a + b;
     if sum == 0.0 {
@@ -411,12 +423,65 @@ impl SpeedCurve {
     }
 }
 
+/// Precomputed defensive multiplier for every typing
+struct TypeDefense {
+    n_types: usize,
+    mono: Box<[f32]>, // indexed by t1
+    dual: Box<[f32]>, // indexed by t1 * n_types + t2 (symmetric, stored full for direct lookup)
+}
+
+impl TypeDefense {
+    fn build(types: &TypeDex) -> Self {
+        let n = types.len();
+        let attackers: Box<[TypeId]> = (0..n).map(TypeId::from_usize).collect();
+        let multiplier = |t1: TypeId, t2: Option<TypeId>| {
+            let total_quarters: u32 = attackers
+                .iter()
+                .map(|&atk| {
+                    let q = type_factor(types, t1, atk);
+                    match t2 {
+                        Some(t2) => q * type_factor(types, t2, atk) / 4,
+                        None => q,
+                    }
+                })
+                .sum();
+            if total_quarters == 0 {
+                4.0 // immune to everything, cap rather than divide by 0
+            } else {
+                4.0 * n as f32 / total_quarters as f32
+            }
+        };
+
+        let mono = attackers.iter().map(|&t1| multiplier(t1, None)).collect();
+        let mut dual = vec![0.0f32; n * n];
+        for t1 in 0..n {
+            for t2 in 0..n {
+                dual[t1 * n + t2] =
+                    multiplier(TypeId::from_usize(t1), Some(TypeId::from_usize(t2)));
+            }
+        }
+        Self {
+            n_types: n,
+            mono,
+            dual: dual.into_boxed_slice(),
+        }
+    }
+
+    fn factor(&self, t1: TypeId, t2: Option<TypeId>) -> f32 {
+        match t2 {
+            Some(t2) => self.dual[t1.to_usize() * self.n_types + t2.to_usize()],
+            None => self.mono[t1.to_usize()],
+        }
+    }
+}
+
 /// Per-search evaluation context for metrics: the dex plus any distribution-derived calibration,
 /// built once so the hot per-fusion loop stays O(1). Future metrics needing other distribution stats
 /// add fields here rather than recomputing per fusion.
 struct MetricContext<'a> {
     dex: &'a InfiniteFusionDex,
     speed: SpeedCurve,
+    type_defense: TypeDefense,
 }
 
 impl<'a> MetricContext<'a> {
@@ -424,6 +489,7 @@ impl<'a> MetricContext<'a> {
         Self {
             dex,
             speed: SpeedCurve::from_speed(dex.species().stat_distributions()),
+            type_defense: TypeDefense::build(dex.types()),
         }
     }
 }
@@ -431,12 +497,18 @@ impl<'a> MetricContext<'a> {
 impl Metric {
     fn fused_value(self, ctx: &MetricContext, head: u32, body: u32) -> f32 {
         let dex = ctx.dex;
-        let head = dex.species().get_item(SpeciesId::from_u32(head)).base_stats;
-        let body = dex.species().get_item(SpeciesId::from_u32(body)).base_stats;
-        let fused = head.fuse(&body);
+        let head_sp = dex.species().get_item(SpeciesId::from_u32(head));
+        let body_sp = dex.species().get_item(SpeciesId::from_u32(body));
+        let fused = head_sp.base_stats.fuse(&body_sp.base_stats);
         let hp = f32::from(fused.hp());
         let (atk, spa) = (f32::from(fused.atk()), f32::from(fused.spa()));
+        let (phys_ehp, spec_ehp) = (hp * f32::from(fused.def()), hp * f32::from(fused.spd()));
+        // lazily evaluated since only the relevant arms need them
         let sweep_speed = || ctx.speed.factor(f32::from(fused.spe()));
+        let type_defense = || {
+            let (t1, t2) = fused_types(head_sp, body_sp, dex.types());
+            ctx.type_defense.factor(t1, t2)
+        };
         match self {
             Metric::Hp => hp,
             Metric::Atk => atk,
@@ -445,11 +517,29 @@ impl Metric {
             Metric::Spd => fused.spd().into(),
             Metric::Spe => fused.spe().into(),
             Metric::Bst => fused.bst().into(),
-            Metric::PhysicalEhp => hp * f32::from(fused.def()),
-            Metric::SpecialEhp => hp * f32::from(fused.spd()),
-            Metric::CombinedEhp => {
-                harmonic_mean(hp * f32::from(fused.def()), hp * f32::from(fused.spd()))
+            Metric::SumOfParts => {
+                let fused_bst = fused.bst() as f32;
+                let head_bst = head_sp.base_stats.bst() as f32;
+                let body_bst = body_sp.base_stats.bst() as f32;
+
+                (fused_bst - head_bst) + (fused_bst - body_bst)
             }
+            Metric::SynergyRatio => {
+                let fused_bst = fused.bst() as f32;
+                let avg_parent =
+                    (head_sp.base_stats.bst() as f32 + body_sp.base_stats.bst() as f32) / 2.0;
+                fused_bst / avg_parent // every species has BST > 0, so no divide-by-zero
+            }
+            Metric::SurplusOverBest => {
+                let best_parent = head_sp.base_stats.bst().max(body_sp.base_stats.bst()) as f32;
+                fused.bst() as f32 - best_parent
+            }
+            Metric::PhysicalEHp => phys_ehp,
+            Metric::SpecialEHp => spec_ehp,
+            Metric::CombinedEHp => harmonic_mean(phys_ehp, spec_ehp),
+            Metric::TAPhysicalEHp => phys_ehp * type_defense(),
+            Metric::TASpecialEHp => spec_ehp * type_defense(),
+            Metric::TACombinedEHp => harmonic_mean(phys_ehp, spec_ehp) * type_defense(),
             Metric::PhysicalSweep => atk * sweep_speed(),
             Metric::SpecialSweep => spa * sweep_speed(),
             Metric::CombinedSweep => atk.max(spa) * sweep_speed(),
@@ -848,7 +938,7 @@ mod test {
             super::harmonic_mean(hp * f32::from(fused.def()), hp * f32::from(fused.spd()))
         };
 
-        let asc = order_matches(&dex, matches.clone(), Some(Metric::CombinedEhp), None);
+        let asc = order_matches(&dex, matches.clone(), Some(Metric::CombinedEHp), None);
         // same set, just reordered, ordered by non-decreasing combined eHP
         assert_eq!(asc.iter().copied().collect::<RoaringBitmap>(), matches);
         assert!(
@@ -918,5 +1008,113 @@ mod test {
 
         let asc_mixed = order_matches(&dex, matches.clone(), Some(Metric::MixedSweep), None);
         assert!(asc_mixed.windows(2).all(|w| mixed(w[0]) <= mixed(w[1])));
+    }
+
+    #[test]
+    fn type_defense_rewards_resistant_typings() {
+        let dex = InfiniteFusionDex::from_path(infinite_fusion_dir(), GameVersion::Kanto).unwrap();
+        let td = super::TypeDefense::build(dex.types());
+        let ty = |key| dex.types().get_full_by_key(key).unwrap().0;
+        let (normal, steel, flying, fire) = (ty("NORMAL"), ty("STEEL"), ty("FLYING"), ty("FIRE"));
+
+        // a neutral-ish typing sits near 1; Steel (many resists + an immunity) is clearly bulkier
+        assert!((td.factor(normal, None) - 1.0).abs() < 0.1);
+        assert!(td.factor(steel, None) > 1.0);
+        assert!(td.factor(steel, None) > td.factor(normal, None));
+        // Steel/Flying improves on mono-Steel (Flying's Ground immunity erases Steel's weakness)
+        assert!(td.factor(steel, Some(flying)) > td.factor(steel, None));
+        // a typing that doubles a weakness (Steel/Fire is still weak to Fire & Ground/Fighting) is
+        // worth less than the Steel/Flying combo
+        assert!(td.factor(steel, Some(fire)) < td.factor(steel, Some(flying)));
+        // ordering is symmetric in the two slots
+        assert_eq!(
+            td.factor(steel, Some(flying)),
+            td.factor(flying, Some(steel))
+        );
+    }
+
+    #[test]
+    fn combined_bulk_scales_ehp_by_typing() {
+        let dex = InfiniteFusionDex::from_path(infinite_fusion_dir(), GameVersion::Kanto).unwrap();
+        let n = dex.species().len() as u32;
+        let bulbasaur = dex.species().get_id_of("BULBASAUR").unwrap();
+        let td = super::TypeDefense::build(dex.types());
+
+        let matches = Filters {
+            has_pokemon: Some(HasPokemon::Either(bulbasaur)),
+            ..Default::default()
+        }
+        .apply(&dex);
+
+        let combined_bulk = |id: u32| {
+            let head_sp = dex.species().get_item(SpeciesId::from_u32(id / n));
+            let body_sp = dex.species().get_item(SpeciesId::from_u32(id % n));
+            let fused = head_sp.base_stats.fuse(&body_sp.base_stats);
+            let hp = f32::from(fused.hp());
+            let ehp =
+                super::harmonic_mean(hp * f32::from(fused.def()), hp * f32::from(fused.spd()));
+            let (t1, t2) = super::fused_types(head_sp, body_sp, dex.types());
+            ehp * td.factor(t1, t2)
+        };
+
+        let asc = order_matches(&dex, matches.clone(), Some(Metric::TACombinedEHp), None);
+        // same set, just reordered, ordered by non-decreasing type-scaled bulk
+        assert_eq!(asc.iter().copied().collect::<RoaringBitmap>(), matches);
+        assert!(
+            asc.windows(2)
+                .all(|w| combined_bulk(w[0]) <= combined_bulk(w[1]))
+        );
+    }
+
+    #[test]
+    fn synergy_variants_order_by_their_formulas() {
+        let dex = InfiniteFusionDex::from_path(infinite_fusion_dir(), GameVersion::Kanto).unwrap();
+        let n = dex.species().len() as u32;
+        let bulbasaur = dex.species().get_id_of("BULBASAUR").unwrap();
+
+        let matches = Filters {
+            has_pokemon: Some(HasPokemon::Either(bulbasaur)),
+            ..Default::default()
+        }
+        .apply(&dex);
+
+        // (fused, head, body) BSTs of a fusion
+        let bsts = |id: u32| {
+            let head = dex
+                .species()
+                .get_item(SpeciesId::from_u32(id / n))
+                .base_stats;
+            let body = dex
+                .species()
+                .get_item(SpeciesId::from_u32(id % n))
+                .base_stats;
+            (
+                head.fuse(&body).bst() as f32,
+                head.bst() as f32,
+                body.bst() as f32,
+            )
+        };
+        let ratio = |id| {
+            let (f, h, b) = bsts(id);
+            f / ((h + b) / 2.0)
+        };
+        let surplus_over_best = |id| {
+            let (f, h, b) = bsts(id);
+            f - h.max(b)
+        };
+
+        let asc_ratio = order_matches(&dex, matches.clone(), Some(Metric::SynergyRatio), None);
+        assert_eq!(
+            asc_ratio.iter().copied().collect::<RoaringBitmap>(),
+            matches
+        );
+        assert!(asc_ratio.windows(2).all(|w| ratio(w[0]) <= ratio(w[1])));
+
+        let asc_best = order_matches(&dex, matches.clone(), Some(Metric::SurplusOverBest), None);
+        assert!(
+            asc_best
+                .windows(2)
+                .all(|w| surplus_over_best(w[0]) <= surplus_over_best(w[1]))
+        );
     }
 }
