@@ -29,11 +29,13 @@
     loop: true,
   });
 
-  const currentLabel = $derived(value === null ? nullLabel : metricLabel(value));
+  const currentLabel = $derived(
+    value === null ? nullLabel : metricLabel(value),
+  );
 
   let openGroup = $state<number | null>(null); // which category's submenu is showing
   let menuEl = $state<HTMLElement>();
-  const rowEls: HTMLElement[] = [];
+  let rowEls = $state<HTMLElement[]>([]);
 
   function pick(m: Metric | null) {
     value = m;
@@ -79,9 +81,9 @@
         return;
       }
 
-      const rowEl = (document.elementFromPoint(p.x, p.y) as HTMLElement | null)?.closest<HTMLElement>(
-        "[data-cat-row]",
-      );
+      const rowEl = (
+        document.elementFromPoint(p.x, p.y) as HTMLElement | null
+      )?.closest<HTMLElement>("[data-cat-row]");
       const overIdx = rowEl ? Number(rowEl.dataset.catRow) : null;
 
       // over the active category's own row -> keep
