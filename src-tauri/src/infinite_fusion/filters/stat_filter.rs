@@ -32,34 +32,13 @@ impl StatRange {
     }
 }
 
-// Each fused stat is `floor(2*dominant/3) + floor(other/3)` (see `base_stats::fuse_calc`), with the
-// head dominant for HP/SpA/SpD and the body dominant for Atk/Def/Spe. For a *fixed head* that's
-// monotonic in the body, so each per-species column is range-queryable for "the bodies that work".
+// Each fused stat is `floor((2*dominant + other) / 3)` (see `base_stats::fuse_calc`), head dominant
+// for HP/SpA/SpD and body dominant for Atk/Def/Spe. For a *fixed head* that's monotonic in the body
+// value, so each per-species column is range-queryable for "the bodies that work".
 //
-// Because the floors are per-term, BST splits cleanly with no residue:
-//   `fused_BST == head_bst_contrib(head) + body_bst_contrib(body)`  (exactly)
-
-/// Head's constant contribution to `fused_BST`: `floor(2*s/3)` over its head-dominant stats plus
-/// `floor(s/3)` over its body-dominant stats.
-fn head_bst_contrib(s: &BaseStats) -> u16 {
-    2 * u16::from(s.hp()) / 3
-        + 2 * u16::from(s.spa()) / 3
-        + 2 * u16::from(s.spd()) / 3
-        + u16::from(s.atk()) / 3
-        + u16::from(s.def()) / 3
-        + u16::from(s.spe()) / 3
-}
-
-/// Body's contribution to `fused_BST`: `floor(s/3)` over the head-dominant stats plus `floor(2*s/3)`
-/// over the body-dominant ones. Bit-sliced so it can be range-queried per head.
-fn body_bst_contrib(s: &BaseStats) -> u16 {
-    u16::from(s.hp()) / 3
-        + u16::from(s.spa()) / 3
-        + u16::from(s.spd()) / 3
-        + 2 * u16::from(s.atk()) / 3
-        + 2 * u16::from(s.def()) / 3
-        + 2 * u16::from(s.spe()) / 3
-}
+// BST is the sum of the six fused stats. The single combined floor couples head and body inside
+// each term, so (unlike a per-term floor) it does NOT split into separate head/body contributions
+// when a BST range is active we just scan this head's bodies (one `fuse()` each), which should be cheap.
 
 /// `(column index in base_stats, is the stat head-dominant, head's raw value)` for a single stat.
 fn stat_column(stat: FusedStat, head: &BaseStats) -> (usize, bool, i32) {
@@ -78,10 +57,8 @@ fn stat_column(stat: FusedStat, head: &BaseStats) -> (usize, bool, i32) {
 /// filter resolves to "the bodies that work for a given head" in a few bitmap ops.
 #[derive(Debug, Clone)]
 pub struct StatIndex {
-    /// hp, atk, def, spa, spd, spe
+    /// hp, atk, def, spa, spd, spe — raw body-value columns
     base_stats: [StatBsi; 6],
-    head_contrib: Box<[u16]>,
-    body_contrib: StatBsi,
     base: Box<[BaseStats]>,
 }
 
@@ -119,23 +96,15 @@ impl StatIndex {
             col(|s| u16::from(s.spe())),
         ];
 
-        let head_contrib = base
-            .iter()
-            .map(head_bst_contrib)
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        let body_contrib = StatBsi::build(&base.iter().map(body_bst_contrib).collect::<Vec<_>>());
-
         Self {
             base_stats,
-            head_contrib,
-            body_contrib,
             base: base.into_boxed_slice(),
         }
     }
 
     /// The body species that, paired with `head_id`, give a fused `stat` within `[lo, hi]`.
-    /// Inverts `fuse_calc` to a body-value interval and range-queries the relevant column
+    /// Per-stat columns invert `fuse_calc` to a body-value interval; BST is scanned directly since
+    /// its combined floor doesn't decompose into per-side contributions.
     fn body_set_for_stat(
         &self,
         head_id: usize,
@@ -143,36 +112,34 @@ impl StatIndex {
         lo: i32,
         hi: i32,
     ) -> RoaringBitmap {
-        let (column, body_lo, body_hi) = match stat {
-            FusedStat::Bst => {
-                // fused_BST == head_contrib[head] + body_contrib[body]
-                let hc = i32::from(self.head_contrib[head_id]);
-                (&self.body_contrib, lo - hc, hi - hc)
-            }
-            stat => {
-                let head = &self.base[head_id];
-                let (idx, head_dominant, hv) = stat_column(stat, head);
-                // invert `floor(2*dom/3) + floor(other/3)` for the body value
-                let (b_lo, b_hi) = if head_dominant {
-                    let c = 2 * hv / 3; // floor(2*head/3), constant for this head
-                    (3 * (lo - c), 3 * (hi - c) + 2)
-                } else {
-                    let c = hv / 3; // floor(head/3)
-                    // ceil(x/2) == (x + 1).div_euclid(2), div_euclid floors
-                    (
-                        (3 * (lo - c) + 1).div_euclid(2),
-                        (3 * (hi - c) + 2).div_euclid(2),
-                    )
-                };
-                (&self.base_stats[idx], b_lo, b_hi)
-            }
+        if stat == FusedStat::Bst {
+            let head = &self.base[head_id];
+            let (lo, hi) = (lo.max(0) as u16, hi.max(0) as u16);
+            return self
+                .base
+                .iter()
+                .enumerate()
+                .filter(|(_, body)| (lo..=hi).contains(&head.fuse(body).bst()))
+                .map(|(body_id, _)| body_id as u32)
+                .collect();
+        }
+
+        let head = &self.base[head_id];
+        let (idx, head_dominant, hv) = stat_column(stat, head);
+        // fused = floor((2*dominant + other) / 3); solve for the body's raw value
+        let (body_lo, body_hi) = if head_dominant {
+            // fused = floor((2*hv + b) / 3)
+            (3 * lo - 2 * hv, 3 * hi + 2 - 2 * hv)
+        } else {
+            // fused = floor((2*b + hv) / 3); ceil(x/2) == (x + 1).div_euclid(2)
+            ((3 * lo - hv + 1).div_euclid(2), (3 * hi + 2 - hv).div_euclid(2))
         };
 
         let body_lo = body_lo.max(0);
         if body_hi < body_lo {
             RoaringBitmap::new() // no body works for this head
         } else {
-            column.range(body_lo as u16, body_hi as u16)
+            self.base_stats[idx].range(body_lo as u16, body_hi as u16)
         }
     }
 
@@ -344,7 +311,7 @@ mod test {
     use crate::{
         infinite_fusion::{
             Dex, DexId, GameVersion, InfiniteFusionDex,
-            filters::stat_filter::{FusedStat, StatIndex, StatRange, head_bst_contrib},
+            filters::stat_filter::{FusedStat, StatIndex, StatRange},
             species::{SpeciesId, base_stats::BaseStats},
         },
         test::infinite_fusion_dir,
@@ -368,12 +335,8 @@ mod test {
             .collect();
         assert_eq!(bsi, manual);
 
-        // unbounded range returns the whole species universe
-        assert_eq!(index.body_contrib.range(0, u16::MAX).len() as usize, n);
-
-        // head contribution is a plain per-species scalar (used as a constant in the per-head loop)
-        assert_eq!(index.head_contrib.len(), n);
-        assert_eq!(index.head_contrib[0], head_bst_contrib(&index.base[0]));
+        // an unbounded range returns the whole species universe
+        assert_eq!(index.base_stats[1].range(0, u16::MAX).len() as usize, n);
     }
 
     #[test]

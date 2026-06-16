@@ -70,6 +70,25 @@ impl BaseStats {
     }
 }
 
+
 fn fuse_calc(dominant: u8, other: u8) -> u8 {
-    (2 * u16::from(dominant) / 3 + u16::from(other) / 3) as u8
+    ((2 * u16::from(dominant) + u16::from(other)) / 3) as u8
+}
+
+#[cfg(test)]
+mod test {
+    use super::BaseStats;
+
+    #[test]
+    fn fuse_rounds_the_combined_numerator() {
+        let dhelmise = BaseStats { hp: 70, atk: 131, def: 100, spa: 86, spd: 90, spe: 40 };
+        let kyogre = BaseStats { hp: 100, atk: 100, def: 90, spa: 150, spd: 140, spe: 90 };
+
+        let fused = dhelmise.fuse(&kyogre);
+        assert_eq!(
+            (fused.hp(), fused.atk(), fused.def(), fused.spa(), fused.spd(), fused.spe()),
+            (80, 110, 93, 107, 106, 73),
+        );
+        assert_eq!(fused.bst(), 569);
+    }
 }
