@@ -5,7 +5,6 @@ pub mod sprites;
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
-    time::Instant,
 };
 
 use serde::{Serializer, ser::SerializeSeq};
@@ -86,18 +85,14 @@ fn search(
     metric2: Option<Metric>,
     synergy: Option<Vec<Stat>>,
 ) -> Result<tauri::ipc::Response, &'static str> {
-    let order_total = Instant::now();
     let synergy_stats = synergy
         .map(|stats| StatMask::from_stats(&stats))
         .unwrap_or(StatMask::ALL);
     let guard = state.0.read().unwrap();
     let dex = &guard.as_ref().ok_or("no game loaded")?.dex;
 
-    let order_start = Instant::now();
     let order = order_matches(dex, filters.apply(dex), metric, metric2, synergy_stats);
-    let order_end = order_start.elapsed();
-    let order_total = order_total.elapsed();
-    eprintln!("ordering time: {order_end:?} search total time: {order_total:?}");
+
     // pack the ids as raw little-/native-endian bytes so the IPC skips JSON entirely
     let bytes: Vec<u8> = order.iter().flat_map(|id| id.to_ne_bytes()).collect();
     Ok(tauri::ipc::Response::new(bytes))

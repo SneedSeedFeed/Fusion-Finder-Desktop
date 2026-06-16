@@ -4,8 +4,6 @@ pub mod move_filter;
 pub mod stat_filter;
 pub mod type_filter;
 
-use std::time::Instant;
-
 use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
 use strum::VariantArray;
@@ -717,9 +715,8 @@ pub fn order_matches(
         return matches.iter().collect();
     };
     let n = dex.species().len() as u32;
-    let ctx_prep = Instant::now();
+
     let ctx = MetricContext::new(dex, synergy_stats); // distribution-derived calibration, once
-    let ctx_end = ctx_prep.elapsed();
 
     // one f32 key per fusion: the metric itself, or the metric/secondary ratio
     let key_of = |id: u32| -> (f32, u32) {
@@ -731,7 +728,6 @@ pub fn order_matches(
         (key, id)
     };
 
-    let keying = Instant::now();
     // most of the below is the expensive part of the workload and is typically faster under rayon
     // its feature flagged so if users dont like it they switch to the non-mt version no problem
     #[cfg(feature = "mt")]
@@ -747,9 +743,7 @@ pub fn order_matches(
     };
     #[cfg(not(feature = "mt"))]
     let mut keyed: Vec<(f32, u32)> = matches.iter().map(key_of).collect();
-    let keying_end = keying.elapsed();
 
-    let sort = Instant::now();
     // according to informal benchmarks this sort takes the majority of processing time
     #[cfg(feature = "mt")]
     {
@@ -758,9 +752,6 @@ pub fn order_matches(
     }
     #[cfg(not(feature = "mt"))]
     keyed.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-    let sort_end = sort.elapsed();
-
-    eprintln!("{ctx_end:?} | {keying_end:?} | {sort_end:?}");
 
     keyed.into_iter().map(|(_, id)| id).collect()
 }
