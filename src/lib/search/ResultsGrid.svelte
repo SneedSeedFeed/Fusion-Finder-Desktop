@@ -113,7 +113,7 @@
       for (const id of missing) requested.add(id);
       try {
         const fetched = await invoke<FusionCard[]>("fusion_cards", {
-          ids: missing,
+          ids: Array.from(missing),
         });
         for (const c of fetched) cards.set(c.id, c);
         evictExcess();
