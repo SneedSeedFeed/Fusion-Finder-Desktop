@@ -208,6 +208,10 @@ export const METRICS = [
   { value: "PhysicalEhp", label: "Physical eHP" },
   { value: "SpecialEhp", label: "Special eHP" },
   { value: "CombinedEhp", label: "Combined eHP" },
+  { value: "PhysicalSweep", label: "Physical Sweep" },
+  { value: "SpecialSweep", label: "Special Sweep" },
+  { value: "CombinedSweep", label: "Combined Sweep" },
+  { value: "MixedSweep", label: "Mixed Sweep" },
 ] as const;
 export type Metric = (typeof METRICS)[number]["value"];
 

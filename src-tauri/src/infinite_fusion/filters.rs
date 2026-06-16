@@ -8,8 +8,16 @@ use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
 
 use crate::infinite_fusion::{
-    Dex, DexId, InfiniteFusionDex, abilities::AbilityId, filters::type_filter::fused_types,
-    moves::MoveId, species::SpeciesDetails, species::SpeciesId, types::TypeDex, types::TypeId,
+    Dex, DexId, InfiniteFusionDex,
+    abilities::AbilityId,
+    filters::type_filter::fused_types,
+    moves::MoveId,
+    species::{
+        SpeciesDetails, SpeciesId,
+        base_stats::{Stat, StatDistributions},
+    },
+    types::TypeDex,
+    types::TypeId,
 };
 
 /// Intersect `set` into a running per-head body set, where `None` means "all bodies so far".
@@ -355,6 +363,13 @@ pub enum Metric {
     SpecialEhp,
     /// harmonic mean of Physical and Special effective health to reward generally bulky pokemon
     CombinedEhp,
+    // sweep metrics: an attacking stat scaled by how usable its speed is
+    PhysicalSweep,
+    SpecialSweep,
+    // the better attacking side scaled by speed
+    CombinedSweep,
+    // the harmonic mean of both attacking sides scaled by speed (rewards mixed attackers like salamence)
+    MixedSweep,
 }
 
 /// Harmonic mean of two values. Pulled toward the smaller of the two, so a lopsided pair scores far
@@ -367,17 +382,66 @@ fn harmonic_mean(a: f32, b: f32) -> f32 {
     2.0 * a * b / sum
 }
 
+/// Logistic mapping from speed to its estimated offensive usefulness.
+/// Mapping is calibrated to the dex's own speed distribution.
+/// Centred on the 50th percentile and tapers at p10 and p90, so a handful of speed freaks can't stretch it.
+/// Is intended to reward attackers at "efficient" speed stats like Garchomp who have enough speed to outspeed and kill but don't waste it like Regieleki
+#[derive(Debug, Clone, Copy)]
+struct SpeedCurve {
+    midpoint: f32, // median speed -> factor 0.5
+    steepness: f32,
+}
+
+impl SpeedCurve {
+    fn from_speed(dist: &StatDistributions) -> Self {
+        let p = |q| f32::from(dist.percentile(Stat::Spe, q));
+        let (p10, p50, p90) = (p(0.10), p(0.50), p(0.90));
+        // endpoint usefulness: a p10 mon ~= EDGE, a p90 mon ~= 1 - EDGE
+        const EDGE: f32 = 0.02;
+        let spread = (p90 - p10).max(1.0); // guard a degenerate (single-value) distribution
+        let steepness = 2.0 * ((1.0 - EDGE) / EDGE).ln() / spread;
+        Self {
+            midpoint: p50,
+            steepness,
+        }
+    }
+
+    fn factor(&self, spe: f32) -> f32 {
+        1.0 / (1.0 + (-self.steepness * (spe - self.midpoint)).exp())
+    }
+}
+
+/// Per-search evaluation context for metrics: the dex plus any distribution-derived calibration,
+/// built once so the hot per-fusion loop stays O(1). Future metrics needing other distribution stats
+/// add fields here rather than recomputing per fusion.
+struct MetricContext<'a> {
+    dex: &'a InfiniteFusionDex,
+    speed: SpeedCurve,
+}
+
+impl<'a> MetricContext<'a> {
+    fn new(dex: &'a InfiniteFusionDex) -> Self {
+        Self {
+            dex,
+            speed: SpeedCurve::from_speed(dex.species().stat_distributions()),
+        }
+    }
+}
+
 impl Metric {
-    fn fused_value(self, dex: &InfiniteFusionDex, head: u32, body: u32) -> f32 {
+    fn fused_value(self, ctx: &MetricContext, head: u32, body: u32) -> f32 {
+        let dex = ctx.dex;
         let head = dex.species().get_item(SpeciesId::from_u32(head)).base_stats;
         let body = dex.species().get_item(SpeciesId::from_u32(body)).base_stats;
         let fused = head.fuse(&body);
         let hp = f32::from(fused.hp());
+        let (atk, spa) = (f32::from(fused.atk()), f32::from(fused.spa()));
+        let sweep_speed = || ctx.speed.factor(f32::from(fused.spe()));
         match self {
             Metric::Hp => hp,
-            Metric::Atk => fused.atk().into(),
+            Metric::Atk => atk,
             Metric::Def => fused.def().into(),
-            Metric::Spa => fused.spa().into(),
+            Metric::Spa => spa,
             Metric::Spd => fused.spd().into(),
             Metric::Spe => fused.spe().into(),
             Metric::Bst => fused.bst().into(),
@@ -386,6 +450,10 @@ impl Metric {
             Metric::CombinedEhp => {
                 harmonic_mean(hp * f32::from(fused.def()), hp * f32::from(fused.spd()))
             }
+            Metric::PhysicalSweep => atk * sweep_speed(),
+            Metric::SpecialSweep => spa * sweep_speed(),
+            Metric::CombinedSweep => atk.max(spa) * sweep_speed(),
+            Metric::MixedSweep => harmonic_mean(atk, spa) * sweep_speed(),
         }
     }
 }
@@ -406,14 +474,15 @@ pub fn order_matches(
         return matches.iter().collect();
     };
     let n = dex.species().len() as u32;
+    let ctx = MetricContext::new(dex); // calibrate the speed tiering curve
 
     // one f32 key per fusion: the metric itself, or the metric/secondary ratio
     let mut keyed: Vec<(f32, u32)> = matches
         .iter()
         .map(|id| {
-            let value = primary.fused_value(dex, id / n, id % n);
+            let value = primary.fused_value(&ctx, id / n, id % n);
             let key = match secondary {
-                Some(denom) => value / denom.fused_value(dex, id / n, id % n),
+                Some(denom) => value / denom.fused_value(&ctx, id / n, id % n),
                 None => value,
             };
             (key, id)
@@ -786,5 +855,68 @@ mod test {
             asc.windows(2)
                 .all(|w| combined_ehp(w[0]) <= combined_ehp(w[1]))
         );
+    }
+
+    #[test]
+    fn combined_sweep_sorts_by_speed_scaled_offence() {
+        // a logistic speed curve (midpoint 90) rises monotonically, hits 0.5 at the midpoint, and saturates toward 0/1 at the extremes
+        let curve = super::SpeedCurve {
+            midpoint: 90.0,
+            steepness: 0.1,
+        };
+        assert!((curve.factor(90.0) - 0.5).abs() < 1e-6);
+        assert!(
+            curve.factor(40.0) < curve.factor(90.0) && curve.factor(90.0) < curve.factor(140.0)
+        );
+        assert!(curve.factor(30.0) < 0.05 && curve.factor(150.0) > 0.95);
+        // with diminishing returns: a step nearer the midpoint gains more than one further out.
+        assert!(
+            (curve.factor(120.0) - curve.factor(110.0))
+                < (curve.factor(100.0) - curve.factor(90.0))
+        );
+
+        let dex = InfiniteFusionDex::from_path(infinite_fusion_dir(), GameVersion::Kanto).unwrap();
+        let n = dex.species().len() as u32;
+        let bulbasaur = dex.species().get_id_of("BULBASAUR").unwrap();
+        // the real, data-calibrated curve the metric uses
+        let curve = super::SpeedCurve::from_speed(dex.species().stat_distributions());
+
+        let matches = Filters {
+            has_pokemon: Some(HasPokemon::Either(bulbasaur)),
+            ..Default::default()
+        }
+        .apply(&dex);
+
+        // (atk, spa, speed_factor) of a fusion, recomputed independently of the metric code
+        let parts = |id: u32| {
+            let head = dex
+                .species()
+                .get_item(SpeciesId::from_u32(id / n))
+                .base_stats;
+            let body = dex
+                .species()
+                .get_item(SpeciesId::from_u32(id % n))
+                .base_stats;
+            let fused = head.fuse(&body);
+            let sf = curve.factor(f32::from(fused.spe()));
+            (f32::from(fused.atk()), f32::from(fused.spa()), sf)
+        };
+
+        // CombinedSweep takes the best attacking side; MixedSweep the harmonic mean of both
+        let combined = |id: u32| {
+            let (a, s, sf) = parts(id);
+            a.max(s) * sf
+        };
+        let mixed = |id: u32| {
+            let (a, s, sf) = parts(id);
+            super::harmonic_mean(a, s) * sf
+        };
+
+        let asc = order_matches(&dex, matches.clone(), Some(Metric::CombinedSweep), None);
+        assert_eq!(asc.iter().copied().collect::<RoaringBitmap>(), matches);
+        assert!(asc.windows(2).all(|w| combined(w[0]) <= combined(w[1])));
+
+        let asc_mixed = order_matches(&dex, matches.clone(), Some(Metric::MixedSweep), None);
+        assert!(asc_mixed.windows(2).all(|w| mixed(w[0]) <= mixed(w[1])));
     }
 }
