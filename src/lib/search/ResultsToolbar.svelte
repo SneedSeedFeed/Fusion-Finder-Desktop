@@ -9,6 +9,7 @@
     sortDesc = $bindable(),
     version,
     onChangeGame,
+    onOpenAreas,
   }: {
     count: number;
     searching: boolean;
@@ -16,6 +17,7 @@
     sortDesc: boolean;
     version: string;
     onChangeGame: () => void;
+    onOpenAreas: () => void;
   } = $props();
 </script>
 
@@ -40,6 +42,12 @@
     title={sortDesc ? "Descending" : "Ascending"}
     aria-label={sortDesc ? "Descending" : "Ascending"}
     onclick={() => (sortDesc = !sortDesc)}>{sortDesc ? "↓" : "↑"}</button
+  >
+  <button
+    type="button"
+    class="rounded border border-gray-700 bg-gray-800 px-2 py-1 text-xs text-gray-300 hover:bg-gray-700"
+    title="What's on a route?"
+    onclick={onOpenAreas}>Areas 🗺️</button
   >
   <button
     type="button"

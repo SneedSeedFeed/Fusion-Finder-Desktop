@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import FusionInspector from "$lib/FusionInspector.svelte";
+  import AreaPanel from "$lib/AreaPanel.svelte";
   import Setup from "$lib/Setup.svelte";
   import ResultsToolbar from "$lib/search/ResultsToolbar.svelte";
   import ResultsGrid from "$lib/search/ResultsGrid.svelte";
@@ -19,6 +20,8 @@
   let searching = $state(false);
   // the fusion (head/body species indices) shown in the inspect modal, if any
   let inspecting = $state<{ head: number; body: number } | null>(null);
+  // whether the (non-blocking) area/route encounter panel is open
+  let showAreas = $state(false);
   let sortBy = $state<SortBy>("DexNumber");
   let sortDesc = $state(false);
 
@@ -107,11 +110,20 @@
           bind:sortDesc
           version={config.version}
           onChangeGame={() => (changingGame = true)}
+          onOpenAreas={() => (showAreas = true)}
         />
         <ResultsGrid {options} {results} onInspect={(f) => (inspecting = f)} />
       </section>
 
       <FilterSidebar bind:filters {options} />
+
+      {#if showAreas}
+        <AreaPanel
+          types={options.types}
+          onClose={() => (showAreas = false)}
+          onInspect={(f) => (inspecting = f)}
+        />
+      {/if}
 
       {#if inspecting}
         <FusionInspector

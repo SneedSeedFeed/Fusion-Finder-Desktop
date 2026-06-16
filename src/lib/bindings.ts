@@ -105,6 +105,20 @@ export interface EncounterRow {
   mode: "Classic" | "Remix" | "Both";
 }
 
+// One Pokémon found at a location
+// Returned by the `area_encounters` command
+export interface AreaEncounter {
+  species: number;
+  dex_id: number;
+  name: string;
+  types: [number, number | null];
+  method: string;
+  chance: number;
+  min_level: number;
+  max_level: number;
+  mode: "Classic" | "Remix" | "Both";
+}
+
 export type LevelNote =
   | "none"
   | "day"

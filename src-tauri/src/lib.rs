@@ -15,6 +15,7 @@ use tauri::{
 
 use crate::infinite_fusion::{
     GameVersion, InfiniteFusionDex,
+    area::AreaEncounter,
     bootstrap::Bootstrap,
     filters::{Filters, SortBy, SortOrder},
     inspect::{FusionDetail, FusionName},
@@ -134,6 +135,25 @@ fn fusion_cards(state: State<'_, AppState>, ids: Vec<u32>) -> Result<Vec<FusionC
             types: dex.fusion_type_ids(id),
         })
         .collect())
+}
+
+/// Every distinct encounter location in the loaded game, for the area picker.
+#[tauri::command]
+fn area_locations(state: State<'_, AppState>) -> Result<Box<[Arc<str>]>, String> {
+    let guard = state.0.read().unwrap();
+    let dex = &guard.as_ref().ok_or("no game loaded")?.dex;
+    Ok(dex.locations())
+}
+
+/// Every Pokémon found at `location`
+#[tauri::command]
+fn area_encounters(
+    state: State<'_, AppState>,
+    location: String,
+) -> Result<Box<[AreaEncounter]>, String> {
+    let guard = state.0.read().unwrap();
+    let dex = &guard.as_ref().ok_or("no game loaded")?.dex;
+    Ok(dex.area_encounters(&location))
 }
 
 // i hate this but it works
@@ -294,6 +314,8 @@ pub fn run() {
             search,
             fusion_cards,
             fusion_detail,
+            area_locations,
+            area_encounters,
             detect_game,
             current_game,
             load_game

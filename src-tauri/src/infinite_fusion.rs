@@ -27,6 +27,7 @@ use crate::infinite_fusion::{
 };
 
 pub mod abilities;
+pub mod area;
 pub mod bootstrap;
 pub mod encounters;
 pub mod filters;
