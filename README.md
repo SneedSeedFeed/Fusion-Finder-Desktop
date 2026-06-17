@@ -2,6 +2,9 @@
 
 A desktop pokedex for the Pokémon fan game [Infinite Fusion](https://discord.com/invite/infinitefusion), built with Tauri, SvelteKit and caffeine.
 
+# On multithreading
+In the release page there should be 2 variants of installer, the one containing the "mt" suffix has multithreading enabled. For most people on modern PCs this should just be faster without any real downsides but your mileage may vary so it's opt-in. If you don't want multithreading or it runs poorly on your machine then pick the non mt build.
+
 # How to use?
 On first launch you'll get a page just asking you to select where your game is. Select the directory you have the game installed to and you should see the following.
 ![Launch page](docs/fusionfinderlaunch.png)

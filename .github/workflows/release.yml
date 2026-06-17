@@ -38,7 +38,7 @@ jobs:
           releaseName: Fusion Finder ${{ github.ref_name }}
           releaseDraft: false
           prerelease: false
-          releaseAssetNamePattern: "[name]_[version]_[arch][setup][ext]"
+          assetNamePattern: "[name]_[version]_[arch][setup][ext]"
 
       - name: Attest provenance (single threaded)
         uses: actions/attest-build-provenance@v4
@@ -57,7 +57,7 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: --features mt
-          releaseAssetNamePattern: "[name]_[version]_[arch]-mt[setup][ext]"
+          assetNamePattern: "[name]_[version]_[arch]-mt[setup][ext]"
 
       - name: Attest provenance (multi threaded)
         uses: actions/attest-build-provenance@v4
