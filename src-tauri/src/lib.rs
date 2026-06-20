@@ -19,6 +19,8 @@ use crate::infinite_fusion::{
     bootstrap::Bootstrap,
     filters::{Filters, Metric, StatMask, order_matches},
     inspect::{FusionDetail, FusionName},
+    move_card::MoveCard,
+    moves::MoveId,
     species::{SpeciesId, base_stats::Stat, name_halves::NameMap},
     types::TypeId,
 };
@@ -156,10 +158,18 @@ fn area_locations(state: State<'_, AppState>) -> Result<Box<[Arc<str>]>, String>
 fn area_encounters(
     state: State<'_, AppState>,
     location: String,
-) -> Result<Box<[AreaEncounter]>, String> {
+) -> Result<Box<[AreaEncounter]>, &'static str> {
     let guard = state.0.read().unwrap();
     let dex = &guard.as_ref().ok_or("no game loaded")?.dex;
     Ok(dex.area_encounters(&location))
+}
+
+/// The hover-card for one move
+#[tauri::command]
+fn move_card(state: State<'_, AppState>, move_id: MoveId) -> Result<MoveCard, &'static str> {
+    let guard = state.0.read().unwrap();
+    let dex = &guard.as_ref().ok_or("no game loaded")?.dex;
+    Ok(dex.move_card(move_id))
 }
 
 // i hate this but it works
@@ -322,6 +332,7 @@ pub fn run() {
             fusion_detail,
             area_locations,
             area_encounters,
+            move_card,
             detect_game,
             current_game,
             load_game

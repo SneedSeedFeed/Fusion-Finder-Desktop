@@ -3,7 +3,7 @@ use roaring::RoaringBitmap;
 use crate::infinite_fusion::{
     Dex, DexId,
     abilities::{AbilityDex, AbilityId},
-    filters::{HasAbility, separable_filter},
+    filters::HasAbility,
     species::{SpeciesDex, SpeciesId},
 };
 
@@ -17,6 +17,7 @@ pub enum AbilitySource {
 /// Per-ability species sets, split by slot (regular vs hidden).
 #[derive(Debug, Clone)]
 pub struct AbilityFilterIndex {
+    #[cfg(test)]
     n_species: usize,
     regular: Box<[RoaringBitmap]>, // indexed by AbilityId
     hidden: Box<[RoaringBitmap]>,
@@ -38,6 +39,7 @@ impl AbilityFilterIndex {
         }
 
         Self {
+            #[cfg(test)]
             n_species: species.len(),
             regular: regular.into_boxed_slice(),
             hidden: hidden.into_boxed_slice(),
@@ -51,10 +53,6 @@ impl AbilityFilterIndex {
             AbilitySource::Hidden => self.hidden[i].clone(),
             AbilitySource::Any => &self.regular[i] | &self.hidden[i],
         }
-    }
-
-    pub fn filter(&self, ability: AbilityId, source: AbilitySource) -> RoaringBitmap {
-        separable_filter(self.n_species, &self.species_with(ability, source))
     }
 
     /// Per-head body set (`None` = the head already has the ability, so every body qualifies).
@@ -80,11 +78,21 @@ mod test {
     use crate::{
         infinite_fusion::{
             Dex, DexId, GameVersion, InfiniteFusionDex,
-            filters::ability_filter::{AbilityFilterIndex, AbilitySource},
+            abilities::AbilityId,
+            filters::{
+                ability_filter::{AbilityFilterIndex, AbilitySource},
+                test::separable_filter,
+            },
             species::SpeciesId,
         },
         test::infinite_fusion_dir,
     };
+
+    impl AbilityFilterIndex {
+        pub fn filter(&self, ability: AbilityId, source: AbilitySource) -> RoaringBitmap {
+            separable_filter(self.n_species, &self.species_with(ability, source))
+        }
+    }
 
     #[test]
     fn ability_filter_matches_a_brute_force_scan() {

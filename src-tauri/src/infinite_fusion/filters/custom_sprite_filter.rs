@@ -9,9 +9,9 @@ use crate::infinite_fusion::{
 
 /// Per-head bitmap of the body indices for which a *base* custom sprite exists, parsed from
 /// `Data/sprites/CUSTOM_SPRITES` (see the `sprites` module for the manifest format). Lets the
-/// "only fusions with a custom sprite" filter run as a per-head body-set intersection like the
-/// other filters. A fusion's custom sprite is keyed by `head.body`, so membership is exact per
-/// (head, body) — not separable.
+/// custom-sprite filter (only-custom / only-autogen) run as a per-head body-set intersection like
+/// the other filters; autogen is just the complement of this set. A fusion's custom sprite is keyed
+/// by `head.body`, so membership is exact per (head, body) — not separable.
 #[derive(Debug, Clone)]
 pub struct CustomSpriteIndex {
     by_head: Box<[RoaringBitmap]>,

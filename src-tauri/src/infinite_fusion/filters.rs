@@ -29,23 +29,6 @@ pub(crate) fn and_in(acc: &mut Option<RoaringBitmap>, set: RoaringBitmap) {
     });
 }
 
-/// Fusion-id set for a *separable* filter matches if head **or** body is in `species`
-/// (e.g. "has ability A"). Head qualifies -> the whole row; else just the qualifying bodies.
-/// Same `head * n + body` scheme as every filter, so combining is a roaring `&`.
-pub(crate) fn separable_filter(n: usize, species: &RoaringBitmap) -> RoaringBitmap {
-    let n = n as u32;
-    let mut result = RoaringBitmap::new();
-    for head in 0..n {
-        let row = head * n;
-        if species.contains(head) {
-            result.insert_range(row..row + n);
-        } else {
-            result.extend(species.iter().map(|body| row + body));
-        }
-    }
-    result
-}
-
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Filters {
     #[serde(default)]
@@ -58,9 +41,9 @@ pub struct Filters {
     pub has_ability: Option<HasAbility>,
     #[serde(default)]
     pub has_move: Option<HasMove>,
-    /// only fusions whose `head.body` has a base custom sprite
+    /// constrain fusions by whether `head.body` has a base custom sprite (`None` = no constraint)
     #[serde(default)]
-    pub has_custom_sprite: bool,
+    pub custom_sprite: Option<CustomSpriteFilter>,
     #[serde(default)]
     pub mono_type: bool,
     /// defensive type-matchup constraint (weak/resist/immune to the given types)
@@ -81,6 +64,12 @@ pub struct Filters {
     pub ignored_species: Box<[SpeciesId]>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+pub enum CustomSpriteFilter {
+    Custom,
+    Autogen,
+}
+
 /// Constrain a fusion by whether it can still evolve. A fusion evolves when *either* component has a
 /// forward evolution, so `CanEvolve` keeps a fusion if head **or** body can evolve, while
 /// `FullyEvolved` keeps it only when **neither** can.
@@ -97,6 +86,11 @@ impl Filters {
         let n = dex.species().len();
         let mut result = RoaringBitmap::new();
 
+        // a species explicitly pinned is exempt from the legendary exclusion asking for a legendary by name shouldn't be cancelled out by "exclude legendaries"
+        let pinned: Option<u32> = self.has_pokemon.map(|has| match has {
+            HasPokemon::Head(p) | HasPokemon::Body(p) | HasPokemon::Either(p) => p.to_u32(),
+        });
+
         // species (by index) allowed by the id cap, the legendary exclusion and/or the user's block
         // list; both head and body must be allowed. Built once, then intersected per-head like any
         // other constraint.
@@ -112,8 +106,9 @@ impl Filters {
                 .enumerate()
                 .filter_map(|(i, s)| {
                     let under_cap = self.block_ids_above.is_none_or(|max| s.id_number <= max);
-                    let not_legendary =
-                        !self.exclude_legendaries || !legendaries.contains(i as u32);
+                    let not_legendary = !self.exclude_legendaries
+                        || !legendaries.contains(i as u32)
+                        || pinned == Some(i as u32);
                     let not_ignored = !ignored.contains(i as u32);
                     (under_cap && not_legendary && not_ignored).then_some(i as u32)
                 })
@@ -198,16 +193,28 @@ impl Filters {
             {
                 and_in(&mut bodies, set);
             }
-            if let Some(has_move) = &self.has_move
-                && let Some(set) = dex.move_index().bodies_for_head(head, has_move)
-            {
-                and_in(&mut bodies, set);
+            if let Some(has_move) = &self.has_move {
+                // the expert path also evaluates per-fusion signature-move conditions and is more expensive
+                let set = if has_move.expert {
+                    dex.move_bodies_for_head_with_expert(head, has_move)
+                } else {
+                    dex.move_index().bodies_for_head(head, has_move)
+                };
+                if let Some(set) = set {
+                    and_in(&mut bodies, set);
+                }
             }
-            if self.has_custom_sprite {
-                and_in(
-                    &mut bodies,
-                    dex.custom_sprite_index().bodies_for_head(head).clone(),
-                );
+            if let Some(kind) = self.custom_sprite {
+                let custom = dex.custom_sprite_index().bodies_for_head(head);
+                let set = match kind {
+                    CustomSpriteFilter::Custom => custom.clone(),
+                    CustomSpriteFilter::Autogen => {
+                        let mut all = RoaringBitmap::new();
+                        all.insert_range(0..n as u32);
+                        all - custom
+                    }
+                };
+                and_in(&mut bodies, set);
             }
             if let Some(set) = defense_bodies(dex, head, self.mono_type, self.defense.as_ref()) {
                 and_in(&mut bodies, set);
@@ -330,6 +337,7 @@ pub struct HasMove {
     pub egg: bool,
     pub level: bool,
     pub tutor: bool,
+    pub expert: bool,
     pub moves: Box<[MoveId]>,
 }
 
@@ -353,8 +361,15 @@ pub struct StatRanges {
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct StatRange<T> {
-    pub min: T,
-    pub max: T,
+    min: T,
+    max: T,
+}
+
+impl<T: PartialOrd> StatRange<T> {
+    pub fn new(min: T, max: T) -> StatRange<T> {
+        debug_assert!(min <= max);
+        StatRange { min, max }
+    }
 }
 
 /// A single sortable quantity derived from a fusion
@@ -757,23 +772,37 @@ pub fn order_matches(
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use roaring::RoaringBitmap;
     use strum::VariantArray;
 
     use super::{
-        DefenseFilter, DefenseRelation, EvolutionFilter, Filters, HasAbility, HasMove, HasPokemon,
-        Metric, StatMask, StatRange, StatRanges, ability_filter::AbilitySource,
-        move_filter::MoveSource, order_matches, separable_filter, stat_filter::FusedStat,
-        stat_filter::StatRange as TaggedRange,
+        CustomSpriteFilter, DefenseFilter, DefenseRelation, EvolutionFilter, Filters, HasAbility,
+        HasMove, HasPokemon, Metric, StatMask, StatRange, StatRanges,
+        ability_filter::AbilitySource, order_matches, stat_filter::FusedStat,
     };
     use crate::{
         infinite_fusion::{
             Dex, DexId, GameVersion, InfiniteFusionDex,
+            filters::{move_filter::test::MoveSource, stat_filter::test::TaggedRange},
             species::{SpeciesId, base_stats::Stat},
         },
         test::infinite_fusion_dir,
     };
+
+    pub(crate) fn separable_filter(n: usize, species: &RoaringBitmap) -> RoaringBitmap {
+        let n = n as u32;
+        let mut result = RoaringBitmap::new();
+        for head in 0..n {
+            let row = head * n;
+            if species.contains(head) {
+                result.insert_range(row..row + n);
+            } else {
+                result.extend(species.iter().map(|body| row + body));
+            }
+        }
+        result
+    }
 
     /// The per-head `apply` must equal the naive `&` of the (separately brute-force tested) standalone filters.
     #[test]
@@ -797,6 +826,7 @@ mod test {
                 egg: false,
                 level: true,
                 tutor: false,
+                expert: false,
                 moves: [tackle].into(),
             }),
             ..Default::default()
@@ -946,13 +976,79 @@ mod test {
     }
 
     #[test]
-    fn has_custom_sprite_is_a_strict_non_empty_subset() {
+    fn has_move_can_include_expert_signature_moves() {
+        let dex = InfiniteFusionDex::from_path(infinite_fusion_dir(), GameVersion::Kanto).unwrap();
+        let n = dex.species().len() as u32;
+        let bee = dex.species().get_id_of("BEEDRILL").unwrap().to_u32();
+        let bulba = dex.species().get_id_of("BULBASAUR").unwrap().to_u32();
+        let attack_order = dex.moves().get_id_of("ATTACKORDER").unwrap();
+
+        let search = |expert| {
+            Filters {
+                has_move: Some(HasMove {
+                    egg: true,
+                    level: true,
+                    tutor: true,
+                    expert,
+                    moves: [attack_order].into(),
+                }),
+                ..Default::default()
+            }
+            .apply(&dex)
+        };
+
+        // Attack Order is expert-only: no fusion can learn it through the normal sources.
+        assert!(!search(false).contains(bee * n + bulba));
+
+        // With the expert source on, a Beedrill fusion (either side) qualifies; others don't.
+        let with = search(true);
+        assert!(with.contains(bee * n + bulba));
+        assert!(with.contains(bulba * n + bee));
+        assert!(!with.contains(bulba * n + bulba));
+    }
+
+    #[test]
+    fn contains_pokemon_exempts_its_species_from_legendary_exclusion() {
+        let dex = InfiniteFusionDex::from_path(infinite_fusion_dir(), GameVersion::Kanto).unwrap();
+        let n = dex.species().len() as u32;
+        let mewtwo = dex.species().get_id_of("MEWTWO").unwrap();
+        let mew = dex.species().get_id_of("MEW").unwrap();
+        let bulba = dex.species().get_id_of("BULBASAUR").unwrap();
+
+        // Pin the legendary Mewtwo while excluding legendaries: Mewtwo must survive on its pinned
+        // side paired with a non-legendary, but other legendaries (Mew) stay excluded.
+        let result = Filters {
+            exclude_legendaries: true,
+            has_pokemon: Some(HasPokemon::Either(mewtwo)),
+            ..Default::default()
+        }
+        .apply(&dex);
+
+        assert!(result.contains(mewtwo.to_u32() * n + bulba.to_u32()));
+        assert!(result.contains(bulba.to_u32() * n + mewtwo.to_u32()));
+        // the exemption is just for the pinned species — Mewtwo with another legendary is still out.
+        assert!(!result.contains(mewtwo.to_u32() * n + mew.to_u32()));
+        // and every kept fusion really does contain Mewtwo.
+        assert!(
+            result
+                .iter()
+                .all(|id| id / n == mewtwo.to_u32() || id % n == mewtwo.to_u32())
+        );
+    }
+
+    #[test]
+    fn custom_sprite_filter_partitions_into_custom_and_autogen() {
         let dex = InfiniteFusionDex::from_path(infinite_fusion_dir(), GameVersion::Kanto).unwrap();
         let n = dex.species().len() as u32;
 
         let all = Filters::default().apply(&dex);
         let custom = Filters {
-            has_custom_sprite: true,
+            custom_sprite: Some(CustomSpriteFilter::Custom),
+            ..Default::default()
+        }
+        .apply(&dex);
+        let autogen = Filters {
+            custom_sprite: Some(CustomSpriteFilter::Autogen),
             ..Default::default()
         }
         .apply(&dex);
@@ -965,6 +1061,10 @@ mod test {
         let bulbasaur = dex.species().get_id_of("BULBASAUR").unwrap();
         let charmander = dex.species().get_id_of("CHARMANDER").unwrap();
         assert!(custom.contains(bulbasaur.to_u32() * n + charmander.to_u32()));
+
+        // custom and autogen are a disjoint, exhaustive partition of the unfiltered set
+        assert!((custom.clone() & autogen.clone()).is_empty());
+        assert_eq!(custom.len() + autogen.len(), all.len());
     }
 
     #[test]

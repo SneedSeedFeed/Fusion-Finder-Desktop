@@ -2,13 +2,18 @@
   import type { MoveOption, NamedId } from "$lib/bindings";
   import { MOVE_CATEGORY, MOVE_FLAGS } from "$lib/bindings";
   import { typeIcon, categoryIcon, typeNameMap } from "$lib/typeIcon";
+  import { showMoveCard, hideMoveCard } from "$lib/moveCard.svelte";
+  import RangeSlider from "$lib/search/RangeSlider.svelte";
   import type { FilterState } from "$lib/searchFilters.svelte";
 
   // The "Moves" filter: selected-move chips, a client-side filterable list over the (small) move
   // pool, and the head/body learn-source toggles. Owns its own list deriveds; the chosen move ids
   // and list-filter inputs live on the shared `filters`.
+  // `filters` is bindable so the ownership chain stays explicit: this component binds sub-properties
+  // of it (filters.movePower, …) into RangeSlider, which Svelte only allows when the prop itself was
+  // received via `bind:`.
   let {
-    filters,
+    filters = $bindable(),
     moves,
     types,
   }: { filters: FilterState; moves: MoveOption[]; types: NamedId[] } = $props();
@@ -22,6 +27,17 @@
   function titleCase(s: string): string {
     return s.charAt(0) + s.slice(1).toLowerCase();
   }
+
+  // slider bounds for the list filters (0 up to the strongest in the pool; priority can go negative)
+  const powerMax = $derived(Math.max(0, ...moves.map((m) => m.power ?? 0)));
+  const effectMax = $derived(
+    Math.max(0, ...moves.map((m) => m.effect_chance ?? 0)),
+  );
+  const accuracyMax = $derived(
+    Math.max(0, ...moves.map((m) => m.accuracy ?? 0)),
+  );
+  const priorityMin = $derived(Math.min(...moves.map((m) => m.priority)));
+  const priorityMax = $derived(Math.max(...moves.map((m) => m.priority)));
 
   const moveById = $derived(new Map(moves.map((m) => [m.id, m])));
   // distinct move types as {id, name}, ordered by name, for the move-type dropdown
@@ -46,8 +62,14 @@
             m.ty === filters.moveTypeFilter) &&
           (filters.moveCategoryFilter === null ||
             m.category === filters.moveCategoryFilter) &&
-          (filters.movePowerMin == null ||
-            (m.power ?? 0) >= filters.movePowerMin) &&
+          (m.power ?? 0) >= filters.movePower[0] &&
+          (m.power ?? 0) <= filters.movePower[1] &&
+          (m.effect_chance ?? 0) >= filters.moveEffectChance[0] &&
+          (m.effect_chance ?? 0) <= filters.moveEffectChance[1] &&
+          (m.accuracy ?? accuracyMax) >= filters.moveAccuracy[0] &&
+          (m.accuracy ?? accuracyMax) <= filters.moveAccuracy[1] &&
+          m.priority >= filters.movePriority[0] &&
+          m.priority <= filters.movePriority[1] &&
           filters.moveFlagFilter.every((f) => m.flags.includes(f)) &&
           (!q ||
             m.name.toLowerCase().includes(q) ||
@@ -104,13 +126,84 @@
       <option value={1}>Special</option>
       <option value={2}>Status</option>
     </select>
-    <input
-      type="number"
-      min="0"
-      placeholder="pow"
-      bind:value={filters.movePowerMin}
-      class="w-16 rounded border border-gray-700 bg-gray-800 p-1 text-xs text-gray-200 placeholder:text-gray-500"
-    />
+  </div>
+
+  <!-- power / secondary-effect-chance range sliders (same vein as the stat sliders) -->
+  <div class="mb-1">
+    <div class="mb-0.5 flex items-center justify-between text-xs">
+      <span
+        class="font-medium {filters.movePower[0] > 0 ||
+        filters.movePower[1] < powerMax
+          ? 'text-blue-400'
+          : 'text-gray-400'}">Power</span
+      >
+      <span class="tabular-nums text-gray-400"
+        >{filters.movePower[0]} – {filters.movePower[1]}</span
+      >
+    </div>
+    <div class="px-2">
+      <RangeSlider min={0} max={powerMax} bind:value={filters.movePower} />
+    </div>
+  </div>
+  <div class="mb-1">
+    <div class="mb-0.5 flex items-center justify-between text-xs">
+      <span
+        class="font-medium {filters.moveEffectChance[0] > 0 ||
+        filters.moveEffectChance[1] < effectMax
+          ? 'text-blue-400'
+          : 'text-gray-400'}">Effect %</span
+      >
+      <span class="tabular-nums text-gray-400"
+        >{filters.moveEffectChance[0]} – {filters.moveEffectChance[1]}</span
+      >
+    </div>
+    <div class="px-2">
+      <RangeSlider
+        min={0}
+        max={effectMax}
+        bind:value={filters.moveEffectChance}
+      />
+    </div>
+  </div>
+  <div class="mb-1">
+    <div class="mb-0.5 flex items-center justify-between text-xs">
+      <span
+        class="font-medium {filters.moveAccuracy[0] > 0 ||
+        filters.moveAccuracy[1] < accuracyMax
+          ? 'text-blue-400'
+          : 'text-gray-400'}">Accuracy</span
+      >
+      <span class="tabular-nums text-gray-400"
+        >{filters.moveAccuracy[0]} – {filters.moveAccuracy[1]}</span
+      >
+    </div>
+    <div class="px-2">
+      <RangeSlider
+        min={0}
+        max={accuracyMax}
+        bind:value={filters.moveAccuracy}
+      />
+    </div>
+  </div>
+  <div class="mb-1">
+    <div class="mb-0.5 flex items-center justify-between text-xs">
+      <span
+        class="font-medium {filters.movePriority[0] > priorityMin ||
+        filters.movePriority[1] < priorityMax
+          ? 'text-blue-400'
+          : 'text-gray-400'}">Priority</span
+      >
+      <span class="tabular-nums text-gray-400"
+        >{filters.movePriority[0]} – +{filters.movePriority[1]}</span
+      >
+    </div>
+    <div class="px-2">
+      <RangeSlider
+        min={priorityMin}
+        max={priorityMax}
+        bind:value={filters.movePriority}
+      />
+    </div>
   </div>
   <div class="mb-1 flex flex-wrap gap-1">
     {#each MOVE_FLAGS as [display, flag] (flag)}
@@ -134,7 +227,8 @@
         <button
           type="button"
           class="flex w-full items-center gap-2 px-2 py-1 text-left text-sm hover:bg-gray-800"
-          title={m.description}
+          onmouseenter={(e) => showMoveCard(m.id, e.currentTarget)}
+          onmouseleave={hideMoveCard}
           onclick={() => filters.addMove(m.id)}
         >
           <span class="flex-1 truncate">{m.name}</span>
@@ -181,6 +275,15 @@
         class="accent-blue-500"
         bind:checked={filters.moveEgg}
       /> egg</label
+    >
+    <label
+      class="flex items-center gap-1"
+      title="Move Expert signature moves (eligibility depends on the fusion)"
+      ><input
+        type="checkbox"
+        class="accent-blue-500"
+        bind:checked={filters.moveExpert}
+      /> expert</label
     >
   </div>
 </fieldset>

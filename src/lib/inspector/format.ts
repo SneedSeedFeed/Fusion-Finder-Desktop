@@ -92,5 +92,7 @@ export function learnLabels(s: LearnSources): string[] {
   if (s.machine !== null) out.push(s.machine);
   if (s.tutor) out.push("Tutor");
   if (s.egg) out.push("Egg");
+  if (s.expert !== null)
+    out.push(s.expert ? "Legendary Move Expert" : "Move Expert");
   return out;
 }

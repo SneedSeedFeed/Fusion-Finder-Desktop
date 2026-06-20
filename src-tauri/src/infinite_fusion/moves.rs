@@ -65,14 +65,12 @@ pub enum Accuracy {
     Always,
 }
 
-impl<'de> Deserialize<'de> for Accuracy {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        match u8::deserialize(deserializer)? {
-            0 => Ok(Accuracy::Always),
-            percent => Ok(Accuracy::Percent(NonZero::new(percent).unwrap())),
+impl Accuracy {
+    /// The hit chance as a plain percent, or `None` for never-miss moves
+    pub fn percent(self) -> Option<u8> {
+        match self {
+            Accuracy::Always => None,
+            Accuracy::Percent(p) => Some(p.get()),
         }
     }
 }
@@ -84,8 +82,21 @@ impl Serialize for Accuracy {
     {
         match self {
             Accuracy::Percent(non_zero) => non_zero.serialize(serializer),
-            Accuracy::Always => 0u8.serialize(serializer),
+            Accuracy::Always => 0.serialize(serializer),
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for Accuracy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match u8::deserialize(deserializer)? {
+            0 => Accuracy::Always,
+            // SAFETY: 0 value is caught by the match arm above
+            other => Accuracy::Percent(unsafe { NonZero::new_unchecked(other) }),
+        })
     }
 }
 

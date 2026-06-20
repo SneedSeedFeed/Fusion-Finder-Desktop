@@ -37,6 +37,7 @@ pub fn fused_types(
 /// the head's type (the duplicate-avoidance rule), so `body_type` is indexed by *both*.
 #[derive(Debug, Clone)]
 pub struct TypeFilterIndex {
+    #[cfg(test)]
     n_species: usize,
     /// head-contributed type per species
     head_type: Vec<TypeId>,
@@ -66,49 +67,11 @@ impl TypeFilterIndex {
         }
 
         Self {
+            #[cfg(test)]
             n_species: species.len(),
             head_type,
             body_type,
         }
-    }
-
-    /// Every fusion that has type `ty`.
-    pub fn filter(&self, ty: TypeId) -> RoaringBitmap {
-        let n = self.n_species;
-        let mut result = RoaringBitmap::new();
-        for head in 0..n {
-            let row = (head * n) as u32;
-            if self.head_type[head] == ty {
-                // head supplies `ty`, so every body yields a fusion that has it
-                result.insert_range(row..row + n as u32);
-            } else {
-                let bodies = &self.body_type[self.head_type[head].to_usize()][ty.to_usize()];
-                result.extend(bodies.iter().map(|body| row + body));
-            }
-        }
-        result
-    }
-
-    /// Every fusion that has *both* `a` and `b`. Pass the same type twice to require mono-`a`.
-    pub fn filter_dual(&self, a: TypeId, b: TypeId) -> RoaringBitmap {
-        let n = self.n_species;
-        let mut result = RoaringBitmap::new();
-        for head in 0..n {
-            let head_type = self.head_type[head];
-            // a fusion's two types are {head_type, body_type}; to hold both `a` and `b` the head
-            // must supply one and the body the other.
-            let needed = if head_type == a {
-                b
-            } else if head_type == b {
-                a
-            } else {
-                continue;
-            };
-            let row = (head * n) as u32;
-            let bodies = &self.body_type[head_type.to_usize()][needed.to_usize()];
-            result.extend(bodies.iter().map(|body| row + body));
-        }
-        result
     }
 
     /// Per-head body set for the type filter (`None` = no type requested). `types` is 1 or 2 entries.
@@ -147,9 +110,51 @@ mod test {
             Dex, DexId, GameVersion, InfiniteFusionDex,
             filters::type_filter::{TypeFilterIndex, body_type_of, head_type_of},
             species::SpeciesId,
+            types::TypeId,
         },
         test::infinite_fusion_dir,
     };
+
+    impl TypeFilterIndex {
+        /// Every fusion that has type `ty`.
+        pub fn filter(&self, ty: TypeId) -> RoaringBitmap {
+            let n = self.n_species;
+            let mut result = RoaringBitmap::new();
+            for head in 0..n {
+                let row = (head * n) as u32;
+                if self.head_type[head] == ty {
+                    // head supplies `ty`, so every body yields a fusion that has it
+                    result.insert_range(row..row + n as u32);
+                } else {
+                    let bodies = &self.body_type[self.head_type[head].to_usize()][ty.to_usize()];
+                    result.extend(bodies.iter().map(|body| row + body));
+                }
+            }
+            result
+        }
+
+        /// Every fusion that has *both* `a` and `b`. Pass the same type twice to require mono-`a`.
+        pub fn filter_dual(&self, a: TypeId, b: TypeId) -> RoaringBitmap {
+            let n = self.n_species;
+            let mut result = RoaringBitmap::new();
+            for head in 0..n {
+                let head_type = self.head_type[head];
+                // a fusion's two types are {head_type, body_type}; to hold both `a` and `b` the head
+                // must supply one and the body the other.
+                let needed = if head_type == a {
+                    b
+                } else if head_type == b {
+                    a
+                } else {
+                    continue;
+                };
+                let row = (head * n) as u32;
+                let bodies = &self.body_type[head_type.to_usize()][needed.to_usize()];
+                result.extend(bodies.iter().map(|body| row + body));
+            }
+            result
+        }
+    }
 
     #[test]
     fn type_filter_matches_a_brute_force_scan() {

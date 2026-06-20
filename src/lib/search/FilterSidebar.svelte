@@ -52,18 +52,21 @@
     <input
       type="checkbox"
       class="accent-blue-500"
-      bind:checked={filters.hasCustomSprite}
-    />
-    Only fusions with a custom sprite
-  </label>
-
-  <label class="mb-3 flex items-center gap-2 text-sm">
-    <input
-      type="checkbox"
-      class="accent-blue-500"
       bind:checked={filters.excludeLegendaries}
     />
     Exclude legendaries
+  </label>
+
+  <label class="mb-3 flex items-center gap-2 text-sm">
+    Custom sprite
+    <select
+      class="ml-auto rounded border border-gray-700 bg-gray-800 p-1 text-xs text-gray-200"
+      bind:value={filters.customSprite}
+    >
+      <option value={null}>Any</option>
+      <option value="Custom">Only custom sprites</option>
+      <option value="Autogen">Only autogen sprites</option>
+    </select>
   </label>
 
   <label class="mb-3 flex items-center gap-2 text-sm">
@@ -175,5 +178,5 @@
     {/if}
   </fieldset>
 
-  <MovePicker {filters} moves={options.moves} types={options.types} />
+  <MovePicker bind:filters moves={options.moves} types={options.types} />
 </aside>

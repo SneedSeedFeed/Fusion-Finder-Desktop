@@ -15,10 +15,6 @@ use crate::{dex_id, infinite_fusion::Dex};
 pub struct TypeSet(u32);
 
 impl TypeSet {
-    pub fn new() -> Self {
-        Self(0)
-    }
-
     pub fn insert(&mut self, ty: TypeId) {
         self.0 |= 1u32 << ty.0;
     }
@@ -103,10 +99,6 @@ pub struct TypeDex {
 }
 
 impl TypeDex {
-    pub fn is_normal_flying(&self, primary: TypeId, secondary: TypeId) -> bool {
-        primary == self.normal_id && secondary == self.flying_id
-    }
-
     pub fn is_normal(&self, ty: TypeId) -> bool {
         self.normal_id == ty
     }

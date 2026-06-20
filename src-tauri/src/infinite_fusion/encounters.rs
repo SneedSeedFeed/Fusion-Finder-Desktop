@@ -1,4 +1,9 @@
-use std::{collections::HashMap, ops::Range, path::Path, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Range,
+    path::Path,
+    sync::Arc,
+};
 
 use reikland::{DeserializerConfig, MixedKeyRef};
 use serde::{
@@ -8,7 +13,7 @@ use serde::{
 use strum::{EnumString, VariantNames};
 
 use crate::infinite_fusion::{
-    BoxCollector, Dex, DexId, DexIdKeyVisitor,
+    BoxCollector, DexId, DexIdKeyVisitor,
     species::{SpeciesDex, SpeciesId},
 };
 
@@ -49,17 +54,6 @@ impl Encounters {
 
     pub fn all(&self) -> &[Encounter] {
         &self.rows
-    }
-
-    pub fn from_bytes(
-        bytes: &[u8],
-        species: &SpeciesDex,
-        map_names: &MapNames,
-    ) -> Result<Self, reikland::MarshalDeserializeError> {
-        Ok(Self::from_rows(
-            Self::wild_rows(bytes, species, map_names)?,
-            species.len(),
-        ))
     }
 
     /// Wild encounters pulled from game data
@@ -199,17 +193,67 @@ impl<'de> Deserialize<'de> for EncounterMethod {
 }
 
 #[derive(Debug, Clone)]
-pub struct MapNames(HashMap<u16, Arc<str>>);
+pub struct MapNames {
+    names: HashMap<u16, Arc<str>>,
+    /// child map id -> parent map id
+    /// Used to resolve an interior map ("Pokemon Center") to the town/route it sits in
+    parents: HashMap<u16, u16>,
+}
 
 impl MapNames {
     pub fn get(&self, map_id: u16) -> Option<&Arc<str>> {
-        self.0.get(&map_id)
+        self.names.get(&map_id)
+    }
+
+    /// The town/route a map belongs to: walk up the parent chain to the outermost *real* location.
+    /// Maps nest under organizational folders, e.g. `Cerulean City > Cities > Kanto`.
+    /// Those folders are empty stub maps, so `populated` (the ids that actually have events) tells real locations from folders:
+    /// we climb only through populated ancestors and stop at the first folder.
+    /// For a top-level map this is its own name; for an interior it's the town.
+    pub fn enclosing_name(&self, map_id: u16, populated: &HashSet<u16>) -> Option<&Arc<str>> {
+        let mut cur = map_id;
+        // bounded walk so we don't walk forever on bad data
+        for _ in 0..16 {
+            match self.parents.get(&cur) {
+                Some(&parent)
+                    if parent != 0
+                        && populated.contains(&parent)
+                        && self.names.contains_key(&parent) =>
+                {
+                    cur = parent;
+                }
+                _ => break,
+            }
+        }
+        self.names.get(&cur)
+    }
+
+    /// Maps each route name to the lowest map id that bears it. Map ids roughly track game
+    /// progression, so this lets the area picker order routes the way you encounter them rather
+    /// than alphabetically. Names aren't unique (shared by multi-floor areas), hence the min.
+    pub fn name_order(&self) -> HashMap<Arc<str>, u16> {
+        let mut order: HashMap<Arc<str>, u16> = HashMap::new();
+        for (&id, name) in &self.names {
+            order
+                .entry(name.clone())
+                .and_modify(|cur| *cur = (*cur).min(id))
+                .or_insert(id);
+        }
+        order
     }
 
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, reikland::MarshalDeserializeError> {
         let bytes = std::fs::read(path).expect("failed to read MapInfos.rxdata");
         reikland::from_bytes_with_config::<MapNames>(&bytes, DeserializerConfig::opinionated())
     }
+}
+
+/// Whether a map name is an internal dev/backup/template/quest-duplicate rather than a real player location.
+/// Real places are typically Title Case with no underscores, thus we filter anything with an underscore, starting in a lowercase character or containing ".old"
+fn is_internal_map_name(name: &str) -> bool {
+    name.contains('_')
+        || name.starts_with(|c: char| c.is_ascii_lowercase())
+        || name.contains(".old")
 }
 
 impl<'de> Deserialize<'de> for MapNames {
@@ -233,14 +277,21 @@ impl<'de> Deserialize<'de> for MapNames {
                 struct MapInfo {
                     #[serde(rename = "@name")]
                     name: Box<str>,
+                    #[serde(rename = "@parent_id", default)]
+                    parent_id: i32,
                 }
 
                 let mut names = HashMap::new();
+                let mut parents = HashMap::new();
                 while let Some(key) = map.next_key::<MixedKeyRef>()? {
                     match key {
                         MixedKeyRef::Int(id) => {
                             let info = map.next_value::<MapInfo>()?;
-                            names.insert(id as u16, Arc::from(info.name));
+                            // skip dev/backup/template/quest-duplicate maps so they never surface as locations
+                            if !is_internal_map_name(&info.name) {
+                                names.insert(id as u16, Arc::from(info.name));
+                                parents.insert(id as u16, info.parent_id as u16);
+                            }
                         }
                         MixedKeyRef::Str(_) => {
                             map.next_value::<IgnoredAny>()?;
@@ -248,7 +299,8 @@ impl<'de> Deserialize<'de> for MapNames {
                     }
                 }
                 names.shrink_to_fit();
-                Ok(MapNames(names))
+                parents.shrink_to_fit();
+                Ok(MapNames { names, parents })
             }
         }
 
@@ -461,10 +513,44 @@ impl<'a, 'de> Visitor<'de> for SlotDeser<'a> {
 
 #[cfg(test)]
 pub(crate) mod test {
+
     use crate::{
-        infinite_fusion::encounters::{EncounterMethod, EncounterMode, Encounters, MapNames},
+        infinite_fusion::{
+            Dex,
+            encounters::{EncounterMethod, EncounterMode, Encounters, MapNames},
+            species::SpeciesDex,
+        },
         test::{infinite_fusion_dir, infinite_fusion_hoenn_dir, maybe_decrypt},
     };
+
+    impl Encounters {
+        pub fn from_bytes(
+            bytes: &[u8],
+            species: &SpeciesDex,
+            map_names: &MapNames,
+        ) -> Result<Self, reikland::MarshalDeserializeError> {
+            Ok(Self::from_rows(
+                Self::wild_rows(bytes, species, map_names)?,
+                species.len(),
+            ))
+        }
+    }
+
+    #[test]
+    fn skips_internal_duplicate_maps() {
+        let map_names =
+            MapNames::from_file(infinite_fusion_hoenn_dir().join("Data/MapInfos.rxdata")).unwrap();
+
+        // the real route is kept...
+        assert!(
+            map_names
+                .names
+                .values()
+                .any(|n| &**n == "Route 104 (North)")
+        );
+        // dev/quest duplicate is dropped, so it can't leak into TM/encounter locations
+        assert!(map_names.names.values().all(|n| &**n != "quest_route 104N"));
+    }
 
     /// `[classic, hoenn]`
     pub(crate) fn load_encounters() -> [Encounters; 2] {

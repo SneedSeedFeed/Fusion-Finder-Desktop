@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { browser } from "$app/environment";
   import { invoke } from "@tauri-apps/api/core";
   import { typeIcon, typeNameMap, typeIds } from "$lib/typeIcon";
   import { methodLabel } from "$lib/inspector/format";
@@ -26,8 +27,17 @@
   let selected = $state<string | null>(null);
   let encounters = $state<AreaEncounter[]>([]);
   let loadingEncounters = $state(false);
-  // Classic and Remix are the game's two wild-encounter difficulty tables.
-  let mode = $state<"Classic" | "Remix">("Classic");
+  // Classic and Remix are the game's two wild-encounter difficulty tables. The choice is remembered
+  // across sessions so you don't have to re-pick it every time the panel opens.
+  const MODE_KEY = "areaPanel.mode";
+  let mode = $state<"Classic" | "Remix">(
+    (browser && localStorage.getItem(MODE_KEY)) === "Remix"
+      ? "Remix"
+      : "Classic",
+  );
+  $effect(() => {
+    if (browser) localStorage.setItem(MODE_KEY, mode);
+  });
   let error = $state<string | null>(null);
 
   onMount(async () => {

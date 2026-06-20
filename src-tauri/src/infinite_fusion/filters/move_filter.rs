@@ -2,23 +2,16 @@ use roaring::RoaringBitmap;
 
 use crate::infinite_fusion::{
     Dex, DexId,
-    filters::{HasMove, and_in, separable_filter},
+    filters::{HasMove, and_in},
     moves::{MoveDex, MoveId},
     species::{SpeciesDex, SpeciesId},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MoveSource {
-    LevelUp,
-    Tutor,
-    Egg,
-    Any,
-}
-
 /// Per-move species sets, split by learn source.
 #[derive(Debug, Clone)]
 pub struct MoveFilterIndex {
-    n_species: usize,
+    #[cfg(test)]
+    n_species: usize, // only used in tests
     level_up: Box<[RoaringBitmap]>, // indexed by MoveId
     tutor: Box<[RoaringBitmap]>,
     egg: Box<[RoaringBitmap]>,
@@ -44,6 +37,7 @@ impl MoveFilterIndex {
         }
 
         Self {
+            #[cfg(test)]
             n_species: species.len(),
             level_up: level_up.into_boxed_slice(),
             tutor: tutor.into_boxed_slice(),
@@ -51,28 +45,15 @@ impl MoveFilterIndex {
         }
     }
 
-    pub fn species_with(&self, move_id: MoveId, source: MoveSource) -> RoaringBitmap {
+    /// Whether `species` can learn `move_id` by any means (level-up, tutor/compatible, or egg)
+    pub fn learns_any(&self, move_id: MoveId, species: SpeciesId) -> bool {
         let i = move_id.to_usize();
-        match source {
-            MoveSource::LevelUp => self.level_up[i].clone(),
-            MoveSource::Tutor => self.tutor[i].clone(),
-            MoveSource::Egg => self.egg[i].clone(),
-            MoveSource::Any => &(&self.level_up[i] | &self.tutor[i]) | &self.egg[i],
-        }
-    }
-
-    pub fn filter(&self, move_id: MoveId, source: MoveSource) -> RoaringBitmap {
-        separable_filter(self.n_species, &self.species_with(move_id, source))
+        let s = species.to_u32();
+        self.level_up[i].contains(s) || self.tutor[i].contains(s) || self.egg[i].contains(s)
     }
 
     /// Species that can learn `move_id` via any of the flagged sources.
-    fn species_with_flags(
-        &self,
-        move_id: MoveId,
-        egg: bool,
-        level: bool,
-        tutor: bool,
-    ) -> RoaringBitmap {
+    pub fn learners(&self, move_id: MoveId, egg: bool, level: bool, tutor: bool) -> RoaringBitmap {
         let i = move_id.to_usize();
         let mut set = RoaringBitmap::new();
         if level {
@@ -93,8 +74,7 @@ impl MoveFilterIndex {
         let head = head.to_u32();
         let mut acc: Option<RoaringBitmap> = None;
         for &move_id in &has_move.moves {
-            let learners =
-                self.species_with_flags(move_id, has_move.egg, has_move.level, has_move.tutor);
+            let learners = self.learners(move_id, has_move.egg, has_move.level, has_move.tutor);
             // if the head can't learn this move, the body must otherwise no constraint from it
             if !learners.contains(head) {
                 and_in(&mut acc, learners);
@@ -105,17 +85,38 @@ impl MoveFilterIndex {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use roaring::RoaringBitmap;
 
     use crate::{
         infinite_fusion::{
             Dex, DexId, GameVersion, InfiniteFusionDex,
-            filters::move_filter::{MoveFilterIndex, MoveSource},
+            filters::{move_filter::MoveFilterIndex, test::separable_filter},
+            moves::MoveId,
             species::SpeciesId,
         },
         test::infinite_fusion_dir,
     };
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum MoveSource {
+        LevelUp,
+        Any,
+    }
+
+    impl MoveFilterIndex {
+        pub fn species_with(&self, move_id: MoveId, source: MoveSource) -> RoaringBitmap {
+            let i = move_id.to_usize();
+            match source {
+                MoveSource::LevelUp => self.level_up[i].clone(),
+                MoveSource::Any => &(&self.level_up[i] | &self.tutor[i]) | &self.egg[i],
+            }
+        }
+
+        pub fn filter(&self, move_id: MoveId, source: MoveSource) -> RoaringBitmap {
+            separable_filter(self.n_species, &self.species_with(move_id, source))
+        }
+    }
 
     #[test]
     fn move_filter_matches_a_brute_force_scan() {

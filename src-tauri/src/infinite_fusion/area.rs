@@ -25,7 +25,8 @@ pub struct AreaEncounter {
 }
 
 impl InfiniteFusionDex {
-    /// Every distinct encounter location, deduped and sorted, for the area picker.
+    /// Every distinct encounter location for the area picker, ordered by map id
+    /// Synthetic routes (Roaming/Starter) have no map id and sort last by name
     pub fn locations(&self) -> Box<[Arc<str>]> {
         let mut locations: Vec<Arc<str>> = self
             .encounters()
@@ -33,8 +34,13 @@ impl InfiniteFusionDex {
             .iter()
             .map(|e| e.route.clone())
             .collect();
+        // sort + dedup by name first to get the distinct set, then re-order by map id.
         locations.sort();
         locations.dedup();
+        locations.sort_by(|a, b| {
+            let order = |name: &Arc<str>| self.route_order.get(name).copied().unwrap_or(u16::MAX);
+            order(a).cmp(&order(b)).then_with(|| a.cmp(b))
+        });
         locations.into_boxed_slice()
     }
 

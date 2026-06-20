@@ -1,9 +1,17 @@
-//! Static / gift encounters recovered from map event scripts.
+//! Static / gift encounters, machine (TM/HM) pickups and move-tutor NPCs recovered from map scripts.
 //!
 //! We deserialize the maps, pull the script-command lines (RGSS event codes 355 = "Script", 655 = continuation) and scrape
-//! `pbWildBattle` / `pbAddPokemon` / `pbCreatePokemon` calls back out into [`Encounter`] rows.
+//! `pbWildBattle` / `pbAddPokemon` / `pbCreatePokemon` calls back out into [`Encounter`] rows,
+//! `pbItemBall` / `pbReceiveItem` calls to learn where each TM/HM is found, and
+//! `pbMoveTutorChoose` calls to learn where each move tutor lives.
 
-use std::{collections::HashSet, path::Path, sync::LazyLock};
+// if you are reading this and thinking of trying this module again do not bother
+
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::{Arc, LazyLock},
+};
 
 use regex::Regex;
 use reikland::DeserializerConfig;
@@ -15,6 +23,8 @@ use serde::{
 use crate::infinite_fusion::{
     Dex,
     encounters::{Encounter, EncounterMethod, EncounterMode, MapNames},
+    items::{ItemDex, ItemId},
+    moves::{MoveDex, MoveId},
     species::{SpeciesDex, SpeciesId},
 };
 
@@ -27,33 +37,115 @@ static ENCOUNTER_CALL: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
-/// Scrape every `Map###.rxdata` in `data_dir` for scripted encounters. Failures are skipped as this is just meant to supplement the main encounters (and could be spotty)
-pub fn collect(data_dir: &Path, species: &SpeciesDex, map_names: &MapNames) -> Vec<Encounter> {
+/// Captures the item handed out by an item-ball or NPC gift, in either the modern
+/// `pbItemBall(:TM11)` symbol style or the legacy `pbItemBall(PBItems::TM10)` constant style.
+/// The single group is the item's symbol (e.g. `TM11`).
+static ITEM_CALL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?:pbItemBall|pbReceiveItem|pbAddItem|pbAddItemSilent)\(\s*(?:PBItems::)?:?([A-Z][A-Z0-9_]*)",
+    )
+    .unwrap()
+});
+
+/// A move symbol (`:DRILLRUN` or the legacy `PBMoves::DRILLRUN`). Applied only to move-tutor lines:
+/// the tutor call shapes vary (`pbMoveTutorChoose(:MOVE)`, `pbMoveTutorBattle(:TYPE,"name",:MOVE…)`,
+/// list forms), so we pull every symbol from the line and keep the ones that resolve as moves —
+/// trainer types/names don't. Dynamic tutors (`pbMoveTutorChoose(pbGet(2))`) carry no symbol and are
+/// simply skipped.
+static MOVE_SYMBOL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?:PBMoves::|:)([A-Z][A-Z0-9_]*)").unwrap());
+
+/// A Move Expert NPC call (`pbSpecialTutor(...)` to teach, `pbShowRareTutorFullList(...)` to preview).
+static EXPERT_CALL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"pbSpecialTutor\(|pbShowRareTutorFullList\(").unwrap());
+
+/// A Move Expert call passing the legendary flag, marking the *Legendary* Move Expert's map.
+static EXPERT_LEGENDARY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"pbShowRareTutorFullList\(\s*true|pbSpecialTutor\([^)]*,\s*true").unwrap()
+});
+
+/// What a single pass over the map files recovers: scripted Pokémon encounters, the routes where
+/// each machine (TM/HM) item can be found, where each move tutor lives, and where the Move Experts
+/// (regular and legendary) are.
+pub struct MapScrape {
+    pub encounters: Vec<Encounter>,
+    /// For each machine item, the routes it can be picked up on (deduped, first-seen order).
+    pub tm_locations: HashMap<ItemId, Box<[Arc<str>]>>,
+    /// For each tutor-taught move, the routes a tutor for it lives on (deduped, first-seen order).
+    pub tutor_locations: HashMap<MoveId, Box<[Arc<str>]>>,
+    /// Routes hosting the regular Move Expert and the Legendary Move Expert.
+    pub expert_normal: Box<[Arc<str>]>,
+    pub expert_legendary: Box<[Arc<str>]>,
+}
+
+/// Scrape every `Map###.rxdata` in `data_dir` for scripted encounters, machine pickups and move
+/// tutors. Failures are skipped as this is just meant to supplement the main data (and could be spotty).
+pub fn collect(
+    data_dir: &Path,
+    species: &SpeciesDex,
+    map_names: &MapNames,
+    items: &ItemDex,
+    moves: &MoveDex,
+) -> MapScrape {
     let mut rows = Vec::new();
     // de-dup identical (species, route, method, level) hits — event pages repeat their command list.
     let mut seen: HashSet<(SpeciesId, u16, EncounterMethod, u8)> = HashSet::new();
 
+    let mut tm_routes: HashMap<ItemId, Vec<Arc<str>>> = HashMap::new();
+    let mut tutor_routes: HashMap<MoveId, Vec<Arc<str>>> = HashMap::new();
+    // a map's event pages repeat their command list, so de-dup (item/move, map) before recording.
+    let mut seen_items: HashSet<(ItemId, u16)> = HashSet::new();
+    let mut seen_tutors: HashSet<(MoveId, u16)> = HashSet::new();
+    let mut expert_normal: Vec<Arc<str>> = Vec::new();
+    let mut expert_legendary: Vec<Arc<str>> = Vec::new();
+
     let Ok(dir) = std::fs::read_dir(data_dir) else {
-        return rows;
+        return MapScrape {
+            encounters: rows,
+            tm_locations: HashMap::new(),
+            tutor_locations: HashMap::new(),
+            expert_normal: Box::new([]),
+            expert_legendary: Box::new([]),
+        };
     };
 
-    for entry in dir.flatten() {
-        let path = entry.path();
-        let Some(map_id) = map_id_from_path(&path) else {
-            continue;
-        };
+    // parse every `Map###.rxdata` once and keep it: we need a whole-game view (which maps are
+    // populated) before resolving any single map's enclosing town, then we scrape from the same parse.
+    let parsed: Vec<(u16, RpgMap)> = dir
+        .flatten()
+        .filter_map(|e| Some((map_id_from_path(&e.path())?, e.path())))
+        .filter_map(|(id, path)| {
+            let bytes = std::fs::read(&path).ok()?;
+            let map = reikland::from_bytes_with_config::<RpgMap>(
+                &bytes,
+                DeserializerConfig::opinionated(),
+            )
+            .ok()?;
+            Some((id, map))
+        })
+        .collect();
+    // a map with events is a real place; the editor's grouping folders (Cities, Routes, …) are empty
+    // stubs, so `enclosing_name` climbs through populated ancestors and stops at the first folder.
+    let populated: HashSet<u16> = parsed
+        .iter()
+        .filter(|(_, m)| m.is_populated())
+        .map(|(id, _)| *id)
+        .collect();
+
+    for (map_id, map) in &parsed {
+        let map_id = *map_id;
         // un-named maps also lack a friendly route name, so skip them as the wild table does.
         let Some(route) = map_names.get(map_id).cloned() else {
             continue;
         };
-        let Ok(bytes) = std::fs::read(&path) else {
-            continue;
-        };
-        let Ok(map) =
-            reikland::from_bytes_with_config::<RpgMap>(&bytes, DeserializerConfig::opinionated())
-        else {
-            continue;
-        };
+        // acquisitions (TMs, tutors) often sit in interior maps ("Pokemon Center"); label them with
+        // the enclosing town/route instead so "where is it" reads as the player thinks of it.
+        let acquired_at = map_names
+            .enclosing_name(map_id, &populated)
+            .cloned()
+            .unwrap_or_else(|| route.clone());
+        // `Some(legendary)` once we see a Move Expert call on this map.
+        let mut map_expert: Option<bool> = None;
 
         for line in map.script_lines() {
             for caps in ENCOUNTER_CALL.captures_iter(line) {
@@ -80,10 +172,80 @@ pub fn collect(data_dir: &Path, species: &SpeciesDex, map_names: &MapNames) -> V
                     });
                 }
             }
+
+            for caps in ITEM_CALL.captures_iter(line) {
+                let Some(item_id) = items.get_id_of(&caps[1]) else {
+                    continue;
+                };
+                // only machines (TM/HM) carry a taught move; plain item pickups we don't track.
+                if items.get_item(item_id).move_taught.is_none() {
+                    continue;
+                }
+                if seen_items.insert((item_id, map_id)) {
+                    tm_routes
+                        .entry(item_id)
+                        .or_default()
+                        .push(acquired_at.clone());
+                }
+            }
+
+            if line.contains("pbMoveTutor") {
+                for caps in MOVE_SYMBOL.captures_iter(line) {
+                    let Some(move_id) = moves.get_id_of(&caps[1]) else {
+                        continue;
+                    };
+                    if seen_tutors.insert((move_id, map_id)) {
+                        tutor_routes
+                            .entry(move_id)
+                            .or_default()
+                            .push(acquired_at.clone());
+                    }
+                }
+            }
+
+            if EXPERT_CALL.is_match(line) {
+                let legendary = EXPERT_LEGENDARY.is_match(line);
+                map_expert = Some(map_expert.unwrap_or(false) || legendary);
+            }
+        }
+
+        if let Some(legendary) = map_expert {
+            let bucket = if legendary {
+                &mut expert_legendary
+            } else {
+                &mut expert_normal
+            };
+            if !bucket.contains(&acquired_at) {
+                bucket.push(acquired_at);
+            }
         }
     }
 
-    rows
+    MapScrape {
+        encounters: rows,
+        tm_locations: box_routes(tm_routes),
+        tutor_locations: box_routes(tutor_routes),
+        expert_normal: expert_normal.into_boxed_slice(),
+        expert_legendary: expert_legendary.into_boxed_slice(),
+    }
+}
+
+/// Freeze the per-key route lists into boxed slices, dropping duplicate names (several interior maps
+/// of one town resolve to the same enclosing name) while preserving first-seen order.
+fn box_routes<K: std::hash::Hash + Eq>(
+    routes: HashMap<K, Vec<Arc<str>>>,
+) -> HashMap<K, Box<[Arc<str>]>> {
+    routes
+        .into_iter()
+        .map(|(id, routes)| {
+            let mut seen = HashSet::new();
+            let deduped: Vec<Arc<str>> = routes
+                .into_iter()
+                .filter(|r| seen.insert(r.clone()))
+                .collect();
+            (id, deduped.into_boxed_slice())
+        })
+        .collect()
 }
 
 /// `…/Map006.rxdata` -> `6`. Returns `None` for anything that isn't a numbered map file
@@ -125,6 +287,12 @@ struct RpgCommand {
 }
 
 impl RpgMap {
+    /// Whether the map has any events at all. Real places (towns, routes, interiors) do; the editor's
+    /// grouping folders (Cities, Routes, …) are empty stubs, which is how we tell them apart.
+    fn is_populated(&self) -> bool {
+        !self.events.is_empty()
+    }
+
     /// Every string parameter across all event commands. Encounter calls turn up in more than one
     /// command type — bare `Script` commands (codes 355/655) but also `Conditional Branch`
     /// scripts (`if pbWildBattle(...)`, code 111) — so rather than filter by code we scan every
@@ -212,7 +380,7 @@ mod test {
         infinite_fusion::{
             Dex,
             encounters::{EncounterMethod, MapNames},
-            map_encounters,
+            map_encounters::{self, MapScrape},
         },
         test::{infinite_fusion_dir, infinite_fusion_hoenn_dir},
     };
@@ -221,16 +389,32 @@ mod test {
     fn scrapes_static_and_gift_encounters_from_maps() {
         let dirs = [infinite_fusion_dir(), infinite_fusion_hoenn_dir()];
         let species = crate::infinite_fusion::species::test::load_species();
+        let items = crate::infinite_fusion::items::test::load_items();
+        let moves = crate::infinite_fusion::moves::test::load_moves();
 
-        let collected: [Vec<_>; 2] = std::array::from_fn(|i| {
+        let collected: [MapScrape; 2] = std::array::from_fn(|i| {
             let map_names = MapNames::from_file(dirs[i].join("Data/MapInfos.rxdata")).unwrap();
-            map_encounters::collect(&dirs[i].join("Data"), &species[i], &map_names)
+            map_encounters::collect(
+                &dirs[i].join("Data"),
+                &species[i],
+                &map_names,
+                &items[i],
+                &moves[i],
+            )
         });
 
-        for (i, rows) in collected.iter().enumerate() {
+        for (i, scrape) in collected.iter().enumerate() {
             assert!(
-                !rows.is_empty(),
+                !scrape.encounters.is_empty(),
                 "expected to scrape some scripted encounters (game {i})"
+            );
+            assert!(
+                !scrape.tm_locations.is_empty(),
+                "expected to scrape some TM/HM pickups (game {i})"
+            );
+            assert!(
+                !scrape.tutor_locations.is_empty(),
+                "expected to scrape some move tutors (game {i})"
             );
         }
 
@@ -238,9 +422,23 @@ mod test {
         let mew = species[0].get_id_of("MEW").unwrap();
         assert!(
             collected[0]
+                .encounters
                 .iter()
                 .any(|e| e.species == mew && e.method == EncounterMethod::Static),
             "expected Mew as a scraped static encounter"
+        );
+
+        // The Move Experts sit on the Sevii Islands in Kanto: regular on Knot, legendary on Boon.
+        let kanto = &collected[0];
+        assert!(
+            kanto.expert_normal.iter().any(|l| &**l == "Knot Island"),
+            "expected the regular Move Expert on Knot Island, got {:?}",
+            kanto.expert_normal
+        );
+        assert!(
+            kanto.expert_legendary.iter().any(|l| &**l == "Boon Island"),
+            "expected the Legendary Move Expert on Boon Island, got {:?}",
+            kanto.expert_legendary
         );
     }
 }

@@ -3,6 +3,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import FusionInspector from "$lib/FusionInspector.svelte";
   import AreaPanel from "$lib/AreaPanel.svelte";
+  import MoveHoverHost from "$lib/MoveHoverHost.svelte";
   import Setup from "$lib/Setup.svelte";
   import ResultsToolbar from "$lib/search/ResultsToolbar.svelte";
   import ResultsGrid from "$lib/search/ResultsGrid.svelte";
@@ -162,6 +163,9 @@
           onClose={() => (inspecting = null)}
         />
       {/if}
+
+      <!-- singleton hover-card for moves in the filter list and inspector -->
+      <MoveHoverHost types={options.types} />
     {/if}
   </main>
 {/if}

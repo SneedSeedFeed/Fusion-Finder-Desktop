@@ -9,7 +9,7 @@ use crate::infinite_fusion::{
     Dex, DexId, InfiniteFusionDex,
     encounters::{EncounterMethod, EncounterMode},
     filters::type_filter::fused_types,
-    moves::MoveCategory,
+    moves::{MoveCategory, MoveId},
     species::{SpeciesId, evolution::EvolutionKind},
     types::TypeId,
 };
@@ -155,10 +155,14 @@ pub struct LearnSources {
     /// learnable from a (non-machine) move tutor
     pub tutor: bool,
     pub egg: bool,
+    /// a Move Expert signature move for this fusion:
+    /// `Some(true)` = legendary expert, `Some(false)` = regular expert, `None` = not an expert move.
+    pub expert: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MoveRow {
+    pub id: MoveId,
     pub name: Box<str>,
     pub ty: TypeId,
     pub category: MoveCategory,
@@ -240,7 +244,7 @@ impl InfiniteFusionDex {
             evolves_into: self.fusion_evos(head, body, true),
             head_line: self.evo_line(head),
             body_line: self.evo_line(body),
-            moves: self.fusion_moves(h, b),
+            moves: self.fusion_moves(head, body, h, b),
             sprites: Box::default(),
         }
     }
@@ -562,13 +566,15 @@ impl InfiniteFusionDex {
         rows.into_boxed_slice()
     }
 
-    /// The fusion's move pool: the union of both parents', tagged with how each is learned.
+    /// The fusion's move pool: the union of both parents', plus any Move Expert signature moves it
+    /// qualifies for, tagged with how each is learned.
     fn fusion_moves(
         &self,
+        head_id: SpeciesId,
+        body_id: SpeciesId,
         head: &crate::infinite_fusion::species::SpeciesDetails,
         body: &crate::infinite_fusion::species::SpeciesDetails,
     ) -> Box<[MoveRow]> {
-        use crate::infinite_fusion::moves::{Accuracy, MoveId};
         use std::collections::HashMap;
 
         // move id -> (min level if a level-up move, learnable by tutor, learnable as egg move)
@@ -598,14 +604,12 @@ impl InfiniteFusionDex {
                     None
                 };
                 MoveRow {
+                    id,
                     name: m.name.clone(),
                     ty: m.ty,
                     category: m.category,
                     power: m.power.map(|p| p.get()),
-                    accuracy: match m.accuracy {
-                        Accuracy::Always => None,
-                        Accuracy::Percent(p) => Some(p.get()),
-                    },
+                    accuracy: m.accuracy.percent(),
                     pp: m.pp,
                     description: m.description.clone(),
                     sources: LearnSources {
@@ -613,6 +617,7 @@ impl InfiniteFusionDex {
                         tutor: tutor && machine.is_none(),
                         machine,
                         egg,
+                        expert: None,
                     },
                 }
             })
@@ -635,10 +640,42 @@ impl InfiniteFusionDex {
                 s.machine = s.machine.take().or(r.machine);
                 s.tutor |= r.tutor;
                 s.egg |= r.egg;
+                s.expert = s.expert.or(r.expert);
             } else {
                 by_name.insert(row.name.clone(), merged.len());
                 merged.push(row);
             }
+        }
+
+        // overlay the Move Expert signature moves this fusion qualifies for
+        let mut experts: HashMap<MoveId, bool> = self
+            .expert_moves_for(head_id, body_id)
+            .into_iter()
+            .collect();
+        for row in &mut merged {
+            if let Some(legendary) = experts.remove(&row.id) {
+                row.sources.expert = Some(legendary);
+            }
+        }
+        for (id, legendary) in experts {
+            let m = self.moves().get_item(id);
+            merged.push(MoveRow {
+                id,
+                name: m.name.clone(),
+                ty: m.ty,
+                category: m.category,
+                power: m.power.map(|p| p.get()),
+                accuracy: m.accuracy.percent(),
+                pp: m.pp,
+                description: m.description.clone(),
+                sources: LearnSources {
+                    level: None,
+                    machine: None,
+                    tutor: false,
+                    egg: false,
+                    expert: Some(legendary),
+                },
+            });
         }
 
         // level-up moves first (by level), then the rest; alphabetical within
@@ -721,6 +758,26 @@ mod test {
                 .any(|e| e.head == diglett && matches!(e.via, Component::Head))
         );
         assert!(d.evolves_into.is_empty());
+    }
+
+    #[test]
+    fn move_pool_includes_expert_signature_moves() {
+        let dex = InfiniteFusionDex::from_path(infinite_fusion_dir(), GameVersion::Kanto).unwrap();
+        let sp = |s: &str| dex.species().get_id_of(s).unwrap();
+
+        // A Beedrill fusion gets Attack Order from the regular expert, tagged accordingly.
+        let bee = dex.fusion_detail(sp("BEEDRILL"), sp("PIDGEY"));
+        let attack_order = bee.moves.iter().find(|m| &*m.name == "Attack Order");
+        assert_eq!(attack_order.map(|m| m.sources.expert), Some(Some(false)));
+
+        // An Electabuzz fusion gets Plasma Fists from the legendary expert.
+        let elec = dex.fusion_detail(sp("ELECTABUZZ"), sp("PIDGEY"));
+        let plasma = elec.moves.iter().find(|m| &*m.name == "Plasma Fists");
+        assert_eq!(plasma.map(|m| m.sources.expert), Some(Some(true)));
+
+        // A fusion that qualifies for neither doesn't gain them.
+        let bulba = dex.fusion_detail(sp("BULBASAUR"), sp("PIDGEY"));
+        assert!(!bulba.moves.iter().any(|m| &*m.name == "Attack Order"));
     }
 
     #[test]

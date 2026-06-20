@@ -3,7 +3,7 @@
 use roaring::RoaringBitmap;
 
 use crate::infinite_fusion::{
-    Dex, DexId, FusionId,
+    Dex, DexId,
     filters::{StatRanges, and_in},
     species::{SpeciesDex, SpeciesId, base_stats::BaseStats},
 };
@@ -17,19 +17,6 @@ pub enum FusedStat {
     Spd,
     Spe,
     Bst,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct StatRange {
-    pub stat: FusedStat,
-    pub min: u16,
-    pub max: u16,
-}
-
-impl StatRange {
-    pub fn new(stat: FusedStat, min: u16, max: u16) -> Self {
-        Self { stat, min, max }
-    }
 }
 
 // Each fused stat is `floor((2*dominant + other) / 3)` (see `base_stats::fuse_calc`), head dominant
@@ -61,25 +48,6 @@ pub struct StatIndex {
     base_stats: [StatBsi; 6],
     base: Box<[BaseStats]>,
 }
-
-macro_rules! impl_ranges {
-    ([$($stat:ident => $idx:literal),*]) => {
-        impl StatIndex {
-            $(
-                pub fn $stat(&self, min: Option<u8>, max: Option<u8>) -> RoaringBitmap {
-                    debug_assert!(min.is_some() || max.is_some());
-                    let bsi = &self.base_stats[$idx];
-                    let min = min.map(From::from).unwrap_or(bsi.min);
-                    let max = max.map(From::from).unwrap_or(bsi.max);
-                    debug_assert!(min < max);
-                    bsi.range(min, max)
-                }
-            )*
-        }
-    };
-}
-
-impl_ranges!([hp => 0, atk => 1, def => 2, spa => 3, spd => 4, spe => 5]);
 
 impl StatIndex {
     pub fn build(species: &SpeciesDex) -> Self {
@@ -186,40 +154,6 @@ impl StatIndex {
         }
         acc
     }
-
-    /// Every fusion (`id = head * n + body`) whose fused stats satisfy all of `ranges`
-    pub fn filter(&self, ranges: &[StatRange]) -> RoaringBitmap {
-        let n = self.base.len();
-        let mut result = RoaringBitmap::new();
-
-        for head_id in 0..n {
-            let mut bodies: Option<RoaringBitmap> = None;
-            for r in ranges {
-                let set =
-                    self.body_set_for_stat(head_id, r.stat, i32::from(r.min), i32::from(r.max));
-                and_in(&mut bodies, set);
-            }
-
-            let row = (head_id * n) as u32;
-            match bodies {
-                Some(bodies) => result.extend(bodies.iter().map(|body| row + body)),
-                None => {
-                    result.insert_range(row..row + n as u32);
-                }
-            }
-        }
-
-        result
-    }
-
-    /// Decode a fusion id (as produced by [`Self::filter`]) back into its head/body species
-    pub fn decode(&self, id: u32) -> FusionId {
-        let n = self.base.len() as u32;
-        FusionId {
-            head: SpeciesId::from_u32(id / n),
-            body: SpeciesId::from_u32(id % n),
-        }
-    }
 }
 
 /// A bit-sliced index of one `u16` column: `slices[k]` holds every id whose value has bit `k` set
@@ -308,17 +242,76 @@ impl StatBsi {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use roaring::RoaringBitmap;
 
     use crate::{
         infinite_fusion::{
             Dex, DexId, GameVersion, InfiniteFusionDex,
-            filters::stat_filter::{FusedStat, StatIndex, StatRange},
+            filters::{
+                and_in,
+                stat_filter::{FusedStat, StatIndex},
+            },
             species::{SpeciesId, base_stats::BaseStats},
         },
         test::infinite_fusion_dir,
     };
+
+    #[derive(Debug, Clone, Copy)]
+    pub struct TaggedRange {
+        pub stat: FusedStat,
+        pub min: u16,
+        pub max: u16,
+    }
+
+    impl TaggedRange {
+        pub fn new(stat: FusedStat, min: u16, max: u16) -> Self {
+            Self { stat, min, max }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct FusionId {
+        pub head: SpeciesId,
+        pub body: SpeciesId,
+    }
+
+    /// Brute-force oracle for the per-head `bodies_for_head` path, used by the tests below.
+    impl StatIndex {
+        /// Every fusion (`id = head * n + body`) whose fused stats satisfy all of `ranges`
+        pub fn filter(&self, ranges: &[TaggedRange]) -> RoaringBitmap {
+            let n = self.base.len();
+            let mut result = RoaringBitmap::new();
+
+            for head_id in 0..n {
+                let mut bodies: Option<RoaringBitmap> = None;
+                for r in ranges {
+                    let set =
+                        self.body_set_for_stat(head_id, r.stat, i32::from(r.min), i32::from(r.max));
+                    and_in(&mut bodies, set);
+                }
+
+                let row = (head_id * n) as u32;
+                match bodies {
+                    Some(bodies) => result.extend(bodies.iter().map(|body| row + body)),
+                    None => {
+                        result.insert_range(row..row + n as u32);
+                    }
+                }
+            }
+
+            result
+        }
+
+        /// Decode a fusion id (as produced by [`Self::filter`]) back into its head/body species
+        pub fn decode(&self, id: u32) -> FusionId {
+            let n = self.base.len() as u32;
+            FusionId {
+                head: SpeciesId::from_u32(id / n),
+                body: SpeciesId::from_u32(id % n),
+            }
+        }
+    }
 
     #[test]
     fn bsi_range_matches_a_manual_scan() {
@@ -351,9 +344,9 @@ mod test {
 
         // single stats (one head-dominant, one body-dominant) plus BST exercises every branch
         let ranges = [
-            StatRange::new(FusedStat::Atk, 90, 140),
-            StatRange::new(FusedStat::Hp, 40, 200),
-            StatRange::new(FusedStat::Bst, 480, 540),
+            TaggedRange::new(FusedStat::Atk, 90, 140),
+            TaggedRange::new(FusedStat::Hp, 40, 200),
+            TaggedRange::new(FusedStat::Bst, 480, 540),
         ];
 
         // independent oracle: compute each fusion's stats straight from base_stats via `fuse()`

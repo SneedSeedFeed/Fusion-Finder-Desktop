@@ -1,4 +1,10 @@
-import type { Bootstrap, EvolutionFilter, Range, StatKey } from "$lib/bindings";
+import type {
+  Bootstrap,
+  CustomSpriteFilter,
+  EvolutionFilter,
+  Range,
+  StatKey,
+} from "$lib/bindings";
 import { STATS } from "$lib/bindings";
 
 // All filter inputs for the search, plus the small mutators and the conversions to/from the
@@ -17,13 +23,18 @@ export class FilterState {
   moveEgg = $state(true);
   moveLevel = $state(true);
   moveTutor = $state(true);
+  moveExpert = $state(true);
   // move-list filters (client-side; the move pool is small)
   moveSearch = $state("");
   moveTypeFilter = $state<number | null>(null);
   moveCategoryFilter = $state<0 | 1 | 2 | null>(null);
-  movePowerMin = $state<number | null>(null);
+  // [min, max] slider positions; only constrain the list when narrower than the full bounds
+  movePower = $state<[number, number]>([0, 0]);
+  moveEffectChance = $state<[number, number]>([0, 0]);
+  moveAccuracy = $state<[number, number]>([0, 0]);
+  movePriority = $state<[number, number]>([0, 0]);
   moveFlagFilter = $state<string[]>([]);
-  hasCustomSprite = $state(false);
+  customSprite = $state<CustomSpriteFilter | null>(null);
   excludeLegendaries = $state(false);
   evolution = $state<EvolutionFilter | null>(null);
   // user-curated block list: species indices to drop from either side of every fusion
@@ -74,12 +85,19 @@ export class FilterState {
     this.moveSearch = "";
     this.moveTypeFilter = null;
     this.moveCategoryFilter = null;
-    this.movePowerMin = null;
+    this.movePower = [options.move_power.min, options.move_power.max];
+    this.moveEffectChance = [
+      options.move_effect_chance.min,
+      options.move_effect_chance.max,
+    ];
+    this.moveAccuracy = [options.move_accuracy.min, options.move_accuracy.max];
+    this.movePriority = [options.move_priority.min, options.move_priority.max];
     this.moveFlagFilter = [];
     this.moveLevel = true;
     this.moveTutor = true;
     this.moveEgg = true;
-    this.hasCustomSprite = false;
+    this.moveExpert = true;
+    this.customSprite = null;
     this.excludeLegendaries = false;
     this.evolution = null;
     this.ignoredSpecies = [];
@@ -111,10 +129,11 @@ export class FilterState {
         egg: this.moveEgg,
         level: this.moveLevel,
         tutor: this.moveTutor,
+        expert: this.moveExpert,
         moves: this.moveIds,
       };
     }
-    if (this.hasCustomSprite) filters.has_custom_sprite = true;
+    if (this.customSprite !== null) filters.custom_sprite = this.customSprite;
     if (this.excludeLegendaries) filters.exclude_legendaries = true;
     if (this.evolution !== null) filters.evolution = this.evolution;
     if (this.ignoredSpecies.length)

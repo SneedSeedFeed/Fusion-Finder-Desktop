@@ -1,10 +1,12 @@
+use std::num::NonZeroU8;
+
 use serde::Serialize;
 
 use crate::infinite_fusion::{
     Dex, DexId,
     abilities::AbilityId,
     filters::StatRange,
-    moves::{MoveCategory, MoveId, flags::MoveFlags},
+    moves::{Accuracy, MoveCategory, MoveId, flags::MoveFlags},
     species::SpeciesId,
     types::TypeId,
 };
@@ -19,6 +21,11 @@ pub struct Bootstrap {
     pub types: Vec<NamedId<TypeId>>,
     pub abilities: Vec<NamedId<AbilityId>>,
     pub stat_bounds: StatBounds,
+    /// slider bounds for the move-list
+    pub move_power: StatRange<u8>,
+    pub move_effect_chance: StatRange<u8>,
+    pub move_accuracy: StatRange<u8>,
+    pub move_priority: StatRange<i8>,
     /// default value for the hidden id-cap filter (`block_ids_above`) where `None` = no cap
     pub block_ids_above: Option<u16>,
 }
@@ -39,7 +46,10 @@ pub struct MoveOption {
     pub ty: TypeId,
     /// "Physical" / 0 | "Special" / 1 | "Status" / 2
     pub category: MoveCategory,
-    pub power: Option<u8>,
+    pub power: Option<NonZeroU8>,
+    pub effect_chance: Option<NonZeroU8>,
+    pub accuracy: Accuracy,
+    pub priority: i8,
     pub description: Box<str>,
     pub flags: MoveFlags,
 }

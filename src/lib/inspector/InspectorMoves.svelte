@@ -1,6 +1,7 @@
 <script lang="ts">
   import { typeIcon, categoryIcon } from "$lib/typeIcon";
   import { learnLabels } from "$lib/inspector/format";
+  import { showMoveCard, hideMoveCard } from "$lib/moveCard.svelte";
   import { MOVE_CATEGORY, type FusionDetail } from "$lib/bindings";
 
   // The fusion's combined move pool, with how each move is learned.
@@ -28,11 +29,15 @@
     </thead>
     <tbody>
       {#each detail.moves as m (m.name)}
-        <tr class="border-t border-gray-800">
+        <tr
+          class="border-t border-gray-800 hover:bg-gray-800/40"
+          onmouseenter={(e) => showMoveCard(m.id, e.currentTarget)}
+          onmouseleave={hideMoveCard}
+        >
           <td class="py-1 pr-2 whitespace-nowrap text-gray-500"
             >{learnLabels(m.sources).join(", ")}</td
           >
-          <td class="pr-2 font-medium" title={m.description}>{m.name}</td>
+          <td class="pr-2 font-medium">{m.name}</td>
           <td class="pr-2"
             ><img
               src={typeIcon(typeName(m.ty))}

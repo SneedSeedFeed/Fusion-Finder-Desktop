@@ -3,6 +3,7 @@ use std::{
     fmt::Display,
     ops::Deref,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use indexmap::IndexMap;
@@ -31,24 +32,26 @@ use crate::infinite_fusion::{
     types::{TypeDex, TypeId},
 };
 
-pub mod abilities;
-pub mod area;
-pub mod bootstrap;
-pub mod encounters;
-pub mod filters;
-pub mod inspect;
-pub mod items;
-pub mod legendaries;
-pub mod map_encounters;
-pub mod moves;
-pub mod settings_data;
-pub mod species;
-pub mod types;
+pub(crate) mod abilities;
+pub(crate) mod area;
+pub(crate) mod bootstrap;
+pub(crate) mod encounters;
+pub(crate) mod expert_moves;
+pub(crate) mod filters;
+pub(crate) mod inspect;
+pub(crate) mod items;
+pub(crate) mod legendaries;
+pub(crate) mod map_encounters;
+pub(crate) mod move_card;
+pub(crate) mod moves;
+pub(crate) mod settings_data;
+pub(crate) mod species;
+pub(crate) mod types;
 
 // maybe just Box::leak this whole thing since the core data is immutable and it's going to get shared between threads??
 /// All data across every fusion. big old type since it's multiple indexmaps so ideally get some pointer around it
 #[derive(Debug)]
-pub struct InfiniteFusionDex {
+pub(crate) struct InfiniteFusionDex {
     abilities: AbilityDex,
     encounters: Encounters,
     items: ItemDex,
@@ -63,6 +66,16 @@ pub struct InfiniteFusionDex {
     /// Reverse map of move -> the machine (TM/HM) item that teaches it. A move in a species'
     /// determines between move tutor only moves and tm moves
     machine_moves: HashMap<MoveId, ItemId>,
+    /// Routes where each machine (TM/HM) item is found in the world, scraped from map scripts
+    tm_locations: HashMap<ItemId, Box<[Arc<str>]>>,
+    /// Routes where a tutor for each tutor-taught move lives, scraped from map scripts
+    tutor_locations: HashMap<MoveId, Box<[Arc<str>]>>,
+    /// Move Expert signature-move rules, scraped from `FusionMoveTutor.rb`
+    expert_moves: Box<[expert_moves::ExpertMove]>,
+    /// Where the regular and legendary Move Expert NPCs are, scraped from map scripts
+    expert_locations: expert_moves::ExpertLocations,
+    /// Route name -> lowest map id bearing it, so the area picker can order routes by map id and hopefully be at least close to progress order
+    route_order: HashMap<Arc<str>, u16>,
     /// Species indices (by `SpeciesId`) flagged legendary in the game's `LEGENDARIES_LIST` for the `exclude_legendaries` filter
     legendaries: RoaringBitmap,
     /// highest in-game dex number this game can actually fuse (`None` = no cap)
@@ -73,12 +86,6 @@ pub struct InfiniteFusionDex {
     rank: Box<[[f32; 256]; 6]>,
     /// speed tier calculation curve for this game data
     speed_curve: SpeedCurve,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-pub struct FusionId {
-    pub head: SpeciesId,
-    pub body: SpeciesId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, strum::EnumString)]
@@ -216,17 +223,22 @@ impl InfiniteFusionDex {
             })
             .unwrap_or_default();
         let mut encounter_rows = Encounters::merge_modes(classic, remix);
-        encounter_rows.extend(map_encounters::collect(
-            &base.join("Data"),
-            &species,
-            &map_names,
-        ));
+        let scrape =
+            map_encounters::collect(&base.join("Data"), &species, &map_names, &items, &moves);
+        let tm_locations = scrape.tm_locations;
+        let tutor_locations = scrape.tutor_locations;
+        let expert_locations = expert_moves::ExpertLocations {
+            normal: scrape.expert_normal,
+            legendary: scrape.expert_legendary,
+        };
+        encounter_rows.extend(scrape.encounters);
         encounter_rows.extend(settings_data::collect(
             &base.join("Data/Scripts"),
             &species,
             &map_names,
         ));
         let encounters = Encounters::from_rows(encounter_rows, species.len());
+        let route_order = map_names.name_order();
 
         let stat_index = StatIndex::build(&species);
         let type_index = TypeFilterIndex::build(&species, &types);
@@ -241,6 +253,9 @@ impl InfiniteFusionDex {
             .enumerate()
             .filter_map(|(i, item)| item.move_taught.map(|mv| (mv, ItemId::from_usize(i))))
             .collect();
+
+        let expert_moves =
+            expert_moves::collect(&base.join("Data/Scripts"), &moves, &species, &types);
 
         let legendaries = legendaries::collect(&base.join("Data/Scripts"), &species);
         let base_stats = species.map().values().map(|s| s.base_stats).collect();
@@ -261,6 +276,11 @@ impl InfiniteFusionDex {
             move_index,
             custom_sprite_index,
             machine_moves,
+            tm_locations,
+            tutor_locations,
+            expert_moves,
+            expert_locations,
+            route_order,
             legendaries,
             max_fusable_id: game_version.max_fusable_id(),
             base_stats,
@@ -297,10 +317,6 @@ impl InfiniteFusionDex {
         &self.stat_index
     }
 
-    pub fn base_stats(&self) -> &[BaseStats] {
-        &self.base_stats
-    }
-
     pub fn speed_curve(&self) -> SpeedCurve {
         self.speed_curve
     }
@@ -325,6 +341,16 @@ impl InfiniteFusionDex {
         let mut types = named_ids(&self.types, |t| t.name.clone());
         types.retain(|t| t.name.as_ref() != "???");
 
+        let (mut power_max, mut effect_max, mut accuracy_max) = (0u8, 0u8, 0u8);
+        let (mut priority_min, mut priority_max) = (0i8, 0i8);
+        for m in self.moves.map().values() {
+            power_max = power_max.max(m.power.map_or(0, |p| p.get()));
+            effect_max = effect_max.max(m.effect_chance.map_or(0, |p| p.get()));
+            accuracy_max = accuracy_max.max(m.accuracy.percent().unwrap_or(0));
+            priority_min = priority_min.min(m.priority);
+            priority_max = priority_max.max(m.priority);
+        }
+
         Bootstrap {
             species_count: self.species.len(),
             species,
@@ -338,43 +364,29 @@ impl InfiniteFusionDex {
                     name: m.name.clone(),
                     ty: m.ty,
                     category: m.category,
-                    power: m.power.map(|p| p.get()),
+                    power: m.power,
+                    effect_chance: m.effect_chance,
+                    accuracy: m.accuracy,
+                    priority: m.priority,
                     description: m.description.clone(),
                     flags: m.flags,
                 })
                 .collect(),
             types,
             abilities: named_ids(&self.abilities, |a| a.name.clone()),
+            move_power: StatRange::new(0, power_max),
+            move_effect_chance: StatRange::new(0, effect_max),
+            move_accuracy: StatRange::new(0, accuracy_max),
+            move_priority: StatRange::new(priority_min, priority_max),
             block_ids_above: self.max_fusable_id,
             stat_bounds: StatBounds {
-                hp: StatRange {
-                    min: min.hp(),
-                    max: max.hp(),
-                },
-                atk: StatRange {
-                    min: min.atk(),
-                    max: max.atk(),
-                },
-                def: StatRange {
-                    min: min.def(),
-                    max: max.def(),
-                },
-                spa: StatRange {
-                    min: min.spa(),
-                    max: max.spa(),
-                },
-                spd: StatRange {
-                    min: min.spd(),
-                    max: max.spd(),
-                },
-                spe: StatRange {
-                    min: min.spe(),
-                    max: max.spe(),
-                },
-                bst: StatRange {
-                    min: self.species.min_bst(),
-                    max: self.species.max_bst(),
-                },
+                hp: StatRange::new(min.hp(), max.hp()),
+                atk: StatRange::new(min.atk(), max.atk()),
+                def: StatRange::new(min.def(), max.def()),
+                spa: StatRange::new(min.spa(), max.spa()),
+                spd: StatRange::new(min.spd(), max.spd()),
+                spe: StatRange::new(min.spe(), max.spe()),
+                bst: StatRange::new(self.species.min_bst(), self.species.max_bst()),
             },
         }
     }

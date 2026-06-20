@@ -26,10 +26,10 @@ use crate::{
     },
 };
 
-pub mod base_stats;
-pub mod evolution;
-pub mod level_move;
-pub mod name_halves;
+pub(crate) mod base_stats;
+pub(crate) mod evolution;
+pub(crate) mod level_move;
+pub(crate) mod name_halves;
 
 #[derive(Debug, Clone)]
 pub struct SpeciesDex {
@@ -97,15 +97,15 @@ pub struct SpeciesDetails {
 
 /// Errors when resolving species details
 #[derive(Debug, Snafu)]
-pub enum SpeciesMapError {
+pub enum SpeciesMapNotFoundError {
     #[snafu(display("type {type_name:?} not found in the TypeDex"))]
-    TypeNotFound { type_name: Box<str> },
+    Type { type_name: Box<str> },
 
     #[snafu(display("evolution target {target:?} not found in the species dex"))]
-    EvolutionTargetNotFound { target: Box<str> },
+    EvoTarget { target: Box<str> },
 
     #[snafu(display("fusion dex number {dex_number} not found in the NameMap"))]
-    NameNotFound { dex_number: u16 },
+    Name { dex_number: u16 },
 }
 
 pub struct UnmappedSpeciesDetails<'a> {
@@ -127,7 +127,7 @@ impl UnmappedSpeciesDetails<'_> {
         dex: IndexMap<Box<str>, Self>,
         types: &TypeDex,
         name_map: &NameMap,
-    ) -> Result<IndexMap<Box<str>, SpeciesDetails>, SpeciesMapError> {
+    ) -> Result<IndexMap<Box<str>, SpeciesDetails>, SpeciesMapNotFoundError> {
         let all_evos = dex
             .values()
             .map(|v| v.map_evos(&dex))
@@ -154,14 +154,12 @@ impl UnmappedSpeciesDetails<'_> {
     fn map_evos(
         &self,
         dex: &IndexMap<Box<str>, Self>,
-    ) -> Result<Box<[Evolution]>, SpeciesMapError> {
+    ) -> Result<Box<[Evolution]>, SpeciesMapNotFoundError> {
         self.evolutions
             .iter()
             .map(|evo| {
                 let target = evo.target();
-                let (idx, _, _) = dex
-                    .get_full(target)
-                    .context(EvolutionTargetNotFoundSnafu { target })?;
+                let (idx, _, _) = dex.get_full(target).context(EvoTargetSnafu { target })?;
                 Ok(evo.assign_id(SpeciesId::from_usize(idx)))
             })
             .collect()
@@ -173,18 +171,18 @@ impl UnmappedSpeciesDetails<'_> {
         types: &TypeDex,
         name_map: &NameMap,
         symbol: &str,
-    ) -> Result<SpeciesDetails, SpeciesMapError> {
+    ) -> Result<SpeciesDetails, SpeciesMapNotFoundError> {
         let id_number = self.id_number as u16;
         let names = match Self::name_dex_override(symbol) {
             Some(national_dex) => name_map.get_by_national_dex(national_dex),
             None => name_map.get_name_halves(id_number),
         }
-        .context(NameNotFoundSnafu {
+        .context(NameSnafu {
             dex_number: id_number,
         })?
         .clone();
 
-        let type1 = types.get_id_of(self.type1).context(TypeNotFoundSnafu {
+        let type1 = types.get_id_of(self.type1).context(TypeSnafu {
             type_name: self.type1,
         })?;
 
@@ -194,7 +192,7 @@ impl UnmappedSpeciesDetails<'_> {
             .map(|type2| {
                 types
                     .get_id_of(type2)
-                    .context(TypeNotFoundSnafu { type_name: type2 })
+                    .context(TypeSnafu { type_name: type2 })
             })
             .transpose()?
             .filter(|&type2| type2 != type1);

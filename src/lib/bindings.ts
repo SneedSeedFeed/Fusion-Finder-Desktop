@@ -21,6 +21,10 @@ export interface MoveOption {
   ty: number;
   category: 0 | 1 | 2;
   power: number | null;
+  effect_chance: number | null;
+  // null = never misses
+  accuracy: number | null;
+  priority: number;
   description: string;
   flags: string;
 }
@@ -61,6 +65,11 @@ export interface Bootstrap {
   types: NamedId[];
   abilities: NamedId[];
   stat_bounds: StatBounds;
+  // slider bounds for the move-list power / secondary-effect-chance / accuracy / priority filters
+  move_power: Range;
+  move_effect_chance: Range;
+  move_accuracy: Range;
+  move_priority: Range;
   block_ids_above: number | null;
 }
 
@@ -119,6 +128,49 @@ export interface AreaEncounter {
   mode: "Classic" | "Remix" | "Both";
 }
 
+// The TM/HM that teaches a move, plus where to find it.
+export interface MachineSource {
+  // the machine's in-game name, e.g. "TM35"
+  name: string;
+  is_hm: boolean;
+  // routes the machine is found on; empty = mart/event-only
+  locations: string[];
+}
+
+// A Move Expert signature move: which expert teaches it, where, and the eligibility rule.
+export interface ExpertSource {
+  // taught by the Legendary Move Expert rather than the regular one
+  legendary: boolean;
+  // routes the relevant Move Expert NPC is found on
+  locations: string[];
+  // plain-English eligibility (the move's separate rules joined by "or")
+  condition: string;
+}
+
+// The move hover-card: a move's stats plus its TM/HM, tutor, and Move Expert sources.
+// Returned by the `move_card` command (send `{ moveId: number }`).
+export interface MoveCard {
+  name: string;
+  // type id; resolve its name/icon via the types table
+  ty: number;
+  category: 0 | 1 | 2;
+  power: number | null;
+  // null = never misses
+  accuracy: number | null;
+  pp: number;
+  priority: number;
+  effect_chance: number | null;
+  description: string;
+  // compact flag string; decode against MOVE_FLAGS
+  flags: string;
+  // present iff a TM/HM teaches this move
+  machine: MachineSource | null;
+  // routes where a move tutor teaches this move; empty if none
+  tutor_locations: string[];
+  // present iff this is a Move Expert signature move
+  expert: ExpertSource | null;
+}
+
 export type LevelNote =
   | "none"
   | "day"
@@ -141,6 +193,8 @@ export interface LearnSources {
   machine: string | null;
   tutor: boolean;
   egg: boolean;
+  // Move Expert signature move: true = legendary expert, false = regular, null = not an expert move
+  expert: boolean | null;
 }
 export interface EvoNode {
   dex_id: number;
@@ -160,6 +214,7 @@ export interface FusionEvo {
   condition: EvoCondition | null;
 }
 export interface MoveRow {
+  id: number;
   name: string;
   ty: number;
   category: 0 | 1 | 2;
@@ -286,6 +341,10 @@ export type SynergyStat = (typeof SYNERGY_STATS)[number]["value"];
 
 // matches the backend EvolutionFilter enum (variant names); null = no evolution constraint
 export type EvolutionFilter = "CanEvolve" | "FullyEvolved";
+
+// matches the backend CustomSpriteFilter enum (variant names); null = no sprite constraint.
+// "Custom" keeps only fusions with a hand-drawn sprite, "Autogen" only those without one.
+export type CustomSpriteFilter = "Custom" | "Autogen";
 
 // ability-relevant move flags (must match the backend's ABILITY_MOVE_FLAGS labels)
 export const MOVE_FLAGS = [

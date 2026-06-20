@@ -162,25 +162,6 @@ impl StatDistributions {
         self.count += 1;
     }
 
-    pub fn count(&self) -> u16 {
-        self.count
-    }
-
-    /// The cumulative rank of `value` for `stat` in `0..=1`: the fraction of species whose base
-    /// `stat` is at or below `value`. The inverse of [`percentile`](Self::percentile) — it maps a
-    /// raw stat onto its place in the field, compressing extremes (255 HP -> ~1.0). Empty -> 0.
-    pub fn rank(&self, stat: Stat, value: u8) -> f32 {
-        if self.count == 0 {
-            return 0.0;
-        }
-        let hist = &self.histograms[stat as usize];
-        let at_or_below: u32 = hist[..=usize::from(value)]
-            .iter()
-            .map(|&c| u32::from(c))
-            .sum();
-        at_or_below as f32 / f32::from(self.count)
-    }
-
     /// A full `[stat][value] -> rank` table (the cumulative distribution per stat), so a hot loop can
     /// turn [`rank`](Self::rank)'s O(value) scan into an O(1) lookup. Build once; empty -> all-zero.
     pub fn rank_table(&self) -> Box<[[f32; 256]; 6]> {
@@ -221,6 +202,27 @@ impl StatDistributions {
 #[cfg(test)]
 mod test {
     use super::{BaseStats, Stat, StatDistributions};
+
+    impl StatDistributions {
+        pub fn count(&self) -> u16 {
+            self.count
+        }
+
+        /// The cumulative rank of `value` for `stat` in `0..=1`: the fraction of species whose base
+        /// `stat` is at or below `value`. The inverse of [`percentile`](Self::percentile) — it maps a
+        /// raw stat onto its place in the field, compressing extremes (255 HP -> ~1.0). Empty -> 0.
+        pub fn rank(&self, stat: Stat, value: u8) -> f32 {
+            if self.count == 0 {
+                return 0.0;
+            }
+            let hist = &self.histograms[stat as usize];
+            let at_or_below: u32 = hist[..=usize::from(value)]
+                .iter()
+                .map(|&c| u32::from(c))
+                .sum();
+            at_or_below as f32 / f32::from(self.count)
+        }
+    }
 
     fn with_speed(spe: u8) -> BaseStats {
         BaseStats {
