@@ -103,7 +103,7 @@
   <!-- filters over the move pool -->
   <input
     type="search"
-    placeholder="search name or effect…"
+    placeholder="search"
     bind:value={filters.moveSearch}
     class="mb-1 w-full rounded border border-gray-700 bg-gray-800 p-1 text-gray-200 placeholder:text-gray-500"
   />
