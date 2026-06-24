@@ -38,7 +38,6 @@ pub struct SpeciesDex {
     max_stats: BaseStats,
     min_bst: u16,
     max_bst: u16,
-    stat_distributions: StatDistributions,
 }
 
 impl Dex for SpeciesDex {
@@ -64,8 +63,12 @@ impl SpeciesDex {
         &self.max_stats
     }
 
-    pub fn stat_distributions(&self) -> &StatDistributions {
-        &self.stat_distributions
+    pub fn stat_distributions(&self) -> StatDistributions {
+        let mut dist = StatDistributions::default();
+        for s in self.map.values() {
+            dist.record(&s.base_stats);
+        }
+        dist
     }
 
     pub fn min_bst(&self) -> u16 {
@@ -250,7 +253,6 @@ impl<'a, 'de> Visitor<'de> for SpeciesDexDeser<'a> {
         let mut max_stats = BaseStats::MIN;
         let mut min_bst = u16::MAX;
         let mut max_bst = u16::MIN;
-        let mut stat_distributions = StatDistributions::default();
 
         while let Some(key) = map.next_key::<MixedKeyRef>()? {
             match key {
@@ -265,7 +267,6 @@ impl<'a, 'de> Visitor<'de> for SpeciesDexDeser<'a> {
                     })? {
                         min_stats.apply_min(&details.base_stats);
                         max_stats.apply_max(&details.base_stats);
-                        stat_distributions.record(&details.base_stats);
                         let bst = details.base_stats.bst();
                         min_bst = min_bst.min(bst);
                         max_bst = max_bst.max(bst);
@@ -284,7 +285,6 @@ impl<'a, 'de> Visitor<'de> for SpeciesDexDeser<'a> {
             max_bst,
             max_stats,
             min_stats,
-            stat_distributions,
         })
     }
 }

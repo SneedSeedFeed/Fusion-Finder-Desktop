@@ -580,8 +580,7 @@ struct MetricContext<'a> {
 
 impl<'a> MetricContext<'a> {
     fn new(dex: &'a InfiniteFusionDex, synergy_mask: StatMask) -> Self {
-        let dist = dex.species().stat_distributions();
-        let rank = dist.rank_table();
+        let rank = &dex.rank;
         let synergy_stats: Box<[Stat]> = Stat::VARIANTS
             .iter()
             .copied()
@@ -1257,7 +1256,7 @@ pub(crate) mod test {
         let n = dex.species().len() as u32;
         let bulbasaur = dex.species().get_id_of("BULBASAUR").unwrap();
         // the real, data-calibrated curve the metric uses
-        let curve = super::SpeedCurve::from_speed(dex.species().stat_distributions());
+        let curve = super::SpeedCurve::from_speed(&dex.species().stat_distributions());
 
         let matches = Filters {
             has_pokemon: Some(HasPokemon::Either(bulbasaur)),
@@ -1400,7 +1399,7 @@ pub(crate) mod test {
         let n = dex.species().len() as u32;
         let bulbasaur = dex.species().get_id_of("BULBASAUR").unwrap();
         let to = super::TypeOffense::build(dex.types());
-        let curve = super::SpeedCurve::from_speed(dex.species().stat_distributions());
+        let curve = super::SpeedCurve::from_speed(&dex.species().stat_distributions());
 
         let matches = Filters {
             has_pokemon: Some(HasPokemon::Either(bulbasaur)),

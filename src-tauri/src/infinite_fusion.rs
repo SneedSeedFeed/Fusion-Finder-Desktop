@@ -261,7 +261,7 @@ impl InfiniteFusionDex {
         let base_stats = species.map().values().map(|s| s.base_stats).collect();
         let dist = species.stat_distributions();
         let rank = dist.rank_table();
-        let speed_curve = SpeedCurve::from_speed(dist);
+        let speed_curve = SpeedCurve::from_speed(&dist);
 
         Ok(Self {
             abilities,
