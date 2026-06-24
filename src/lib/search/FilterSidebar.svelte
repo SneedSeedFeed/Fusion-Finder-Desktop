@@ -3,6 +3,7 @@
   import type { FilterState } from "$lib/searchFilters.svelte";
   import Combobox from "$lib/Combobox.svelte";
   import TypePicker from "$lib/search/TypePicker.svelte";
+  import DefenseMatchupPicker from "$lib/search/DefenseMatchupPicker.svelte";
   import StatSliders from "$lib/search/StatSliders.svelte";
   import MovePicker from "$lib/search/MovePicker.svelte";
 
@@ -100,15 +101,10 @@
 
   <fieldset class="mb-3 rounded-md border border-gray-800 p-2">
     <legend class="px-1 text-sm font-semibold text-gray-300">Defense</legend>
-    <select
-      class="mb-2 w-full rounded border border-gray-700 bg-gray-800 p-1 text-xs text-gray-200"
-      bind:value={filters.defenseRelation}
-    >
-      <option value="Resist">Resists…</option>
-      <option value="Weak">Weak to…</option>
-      <option value="Immune">Immune to…</option>
-    </select>
-    <TypePicker types={options.types} bind:value={filters.defenseTypes} />
+    <DefenseMatchupPicker
+      types={options.types}
+      bind:value={filters.defenseMatchups}
+    />
   </fieldset>
 
   <fieldset class="mb-3 rounded-md border border-gray-800 p-2">

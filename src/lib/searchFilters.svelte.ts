@@ -15,8 +15,8 @@ export class FilterState {
   pokemonPosition = $state<"Either" | "Head" | "Body">("Either");
   selectedTypes = $state<number[]>([]);
   monoType = $state(false);
-  defenseRelation = $state<"Weak" | "Resist" | "Immune">("Resist");
-  defenseTypes = $state<number[]>([]);
+  // per-type defensive matchup constraint: typeId -> required effectiveness in quarter units
+  defenseMatchups = $state<Record<number, 0 | 1 | 2 | 4 | 8 | 16>>({});
   abilityId = $state<number | null>(null);
   abilitySlot = $state<"Normal" | "Hidden" | "Either">("Either");
   moveIds = $state<number[]>([]);
@@ -77,8 +77,7 @@ export class FilterState {
     this.pokemonPosition = "Either";
     this.selectedTypes = [];
     this.monoType = false;
-    this.defenseRelation = "Resist";
-    this.defenseTypes = [];
+    this.defenseMatchups = {};
     this.abilityId = null;
     this.abilitySlot = "Either";
     this.moveIds = [];
@@ -117,10 +116,13 @@ export class FilterState {
       filters.has_pokemon = { [this.pokemonPosition]: this.hasPokemon };
     if (this.selectedTypes.length) filters.has_type = this.selectedTypes;
     if (this.monoType) filters.mono_type = true;
-    if (this.defenseTypes.length)
+    const matchups = Object.entries(this.defenseMatchups);
+    if (matchups.length)
       filters.defense = {
-        relation: this.defenseRelation,
-        types: this.defenseTypes,
+        matchups: matchups.map(([type, quarters]) => ({
+          type: Number(type),
+          quarters,
+        })),
       };
     if (this.abilityId !== null)
       filters.has_ability = { [this.abilitySlot]: this.abilityId };

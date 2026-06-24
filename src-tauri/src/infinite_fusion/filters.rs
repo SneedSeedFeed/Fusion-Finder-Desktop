@@ -247,18 +247,16 @@ pub enum HasPokemon {
     Body(SpeciesId),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-pub enum DefenseRelation {
-    Weak,
-    Resist,
-    Immune,
-}
-
-/// Constrain a fusion's defensive matchups: it must hold `relation` against every given type
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DefenseFilter {
-    pub relation: DefenseRelation,
-    pub types: Box<[TypeId]>,
+    pub matchups: Box<[DefenseMatchup]>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+pub struct DefenseMatchup {
+    #[serde(rename = "type")]
+    pub attacker: TypeId,
+    pub quarters: u8,
 }
 
 /// Bodies (by index) whose fusion with `head` satisfies the mono-type / defensive constraints returning `None` when neither is active
@@ -282,9 +280,9 @@ fn defense_bodies(
         }
         if let Some(def) = defense
             && !def
-                .types
+                .matchups
                 .iter()
-                .all(|&atk| matches_relation(types, t1, t2, atk, def.relation))
+                .all(|m| fused_factor(types, t1, t2, m.attacker) == m.quarters)
         {
             continue;
         }
@@ -294,7 +292,7 @@ fn defense_bodies(
 }
 
 /// `attack`'s effectiveness against defender type `d`, in quarter units (0 = immune, 2 = 0.5×, 4 = 1×, 8 = 2×).
-fn type_factor(types: &TypeDex, d: TypeId, attack: TypeId) -> u32 {
+fn type_factor(types: &TypeDex, d: TypeId, attack: TypeId) -> u8 {
     let det = types.get_item(d);
     if det.immunities.contains(attack) {
         0
@@ -307,22 +305,13 @@ fn type_factor(types: &TypeDex, d: TypeId, attack: TypeId) -> u32 {
     }
 }
 
-fn matches_relation(
-    types: &TypeDex,
-    t1: TypeId,
-    t2: Option<TypeId>,
-    attack: TypeId,
-    relation: DefenseRelation,
-) -> bool {
+/// Combined effectiveness of `attack` against the fused defender `(t1, t2)`, in quarter units.
+fn fused_factor(types: &TypeDex, t1: TypeId, t2: Option<TypeId>, attack: TypeId) -> u8 {
     let mut quarters = type_factor(types, t1, attack);
     if let Some(t2) = t2 {
         quarters = quarters * type_factor(types, t2, attack) / 4;
     }
-    match relation {
-        DefenseRelation::Weak => quarters > 4,
-        DefenseRelation::Resist => quarters > 0 && quarters < 4,
-        DefenseRelation::Immune => quarters == 0,
-    }
+    quarters
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -486,7 +475,7 @@ impl TypeDefense {
         let n = types.len();
         let attackers: Box<[TypeId]> = (0..n).map(TypeId::from_usize).collect();
         let multiplier = |t1: TypeId, t2: Option<TypeId>| {
-            let total_quarters: u32 = attackers
+            let total_quarters: u8 = attackers
                 .iter()
                 .map(|&atk| {
                     let q = type_factor(types, t1, atk);
@@ -538,7 +527,7 @@ impl TypeOffense {
         let n = types.len();
         let defenders: Box<[TypeId]> = (0..n).map(TypeId::from_usize).collect();
         let multiplier = |t1: TypeId, t2: Option<TypeId>| {
-            let total_quarters: u32 = defenders
+            let total_quarters: u8 = defenders
                 .iter()
                 .map(|&d| {
                     let q1 = type_factor(types, d, t1);
@@ -777,7 +766,7 @@ pub(crate) mod test {
     use strum::VariantArray;
 
     use super::{
-        CustomSpriteFilter, DefenseFilter, DefenseRelation, EvolutionFilter, Filters, HasAbility,
+        CustomSpriteFilter, DefenseFilter, DefenseMatchup, EvolutionFilter, Filters, HasAbility,
         HasMove, HasPokemon, Metric, StatMask, StatRange, StatRanges,
         ability_filter::AbilitySource, order_matches, stat_filter::FusedStat,
     };
@@ -911,8 +900,11 @@ pub(crate) mod test {
         // Diglett/Diglett is pure Ground thus immune to Electric and mono-type
         let immune = Filters {
             defense: Some(DefenseFilter {
-                relation: DefenseRelation::Immune,
-                types: [electric].into(),
+                matchups: [DefenseMatchup {
+                    attacker: electric,
+                    quarters: 0,
+                }]
+                .into(),
             }),
             ..Default::default()
         }
