@@ -7,12 +7,21 @@ import type {
 } from "$lib/bindings";
 import { STATS } from "$lib/bindings";
 
+export type PokemonPosition = "Either" | "Head" | "Body";
+export interface PokemonPick {
+  id: number;
+  position: PokemonPosition;
+}
+
 // All filter inputs for the search, plus the small mutators and the conversions to/from the
 // backend. Held as a single reactive object so the page and the filter components share one
 // source of truth instead of threading ~20 pieces of state around.
 export class FilterState {
-  hasPokemon = $state<number | null>(null);
-  pokemonPosition = $state<"Either" | "Head" | "Body">("Either");
+  // "contains" picks: each species plus the side(s) it may occupy. With `hasPokemonBothSides` off
+  // a fusion matches when any pick is satisfied; on, both components must be picks (e.g. all
+  // combinations among a chosen set).
+  hasPokemon = $state<PokemonPick[]>([]);
+  hasPokemonBothSides = $state(false);
   selectedTypes = $state<number[]>([]);
   monoType = $state(false);
   // per-type defensive matchup constraint: typeId -> required effectiveness in quarter units
@@ -53,6 +62,21 @@ export class FilterState {
       : [...this.moveFlagFilter, f];
   }
 
+  addPokemon(id: number) {
+    if (!this.hasPokemon.some((p) => p.id === id))
+      this.hasPokemon = [...this.hasPokemon, { id, position: "Either" }];
+  }
+
+  removePokemon(id: number) {
+    this.hasPokemon = this.hasPokemon.filter((p) => p.id !== id);
+  }
+
+  setPokemonPosition(id: number, position: PokemonPosition) {
+    this.hasPokemon = this.hasPokemon.map((p) =>
+      p.id === id ? { ...p, position } : p,
+    );
+  }
+
   addMove(id: number) {
     if (!this.moveIds.includes(id)) this.moveIds = [...this.moveIds, id];
   }
@@ -73,8 +97,8 @@ export class FilterState {
   // Reset every filter to its default and seed the per-game bits (stat sliders, id cap) from the
   // freshly-loaded dex. Called on game load and by the "Clear all" button.
   reset(options: Bootstrap) {
-    this.hasPokemon = null;
-    this.pokemonPosition = "Either";
+    this.hasPokemon = [];
+    this.hasPokemonBothSides = false;
     this.selectedTypes = [];
     this.monoType = false;
     this.defenseMatchups = {};
@@ -112,8 +136,14 @@ export class FilterState {
   // The payload the backend `search` command expects — only includes a filter when it's active.
   build(options: Bootstrap): Record<string, unknown> {
     const filters: Record<string, unknown> = {};
-    if (this.hasPokemon !== null)
-      filters.has_pokemon = { [this.pokemonPosition]: this.hasPokemon };
+    if (this.hasPokemon.length)
+      filters.has_pokemon = {
+        picks: this.hasPokemon.map((p) => ({
+          species: p.id,
+          position: p.position,
+        })),
+        both_sides: this.hasPokemonBothSides,
+      };
     if (this.selectedTypes.length) filters.has_type = this.selectedTypes;
     if (this.monoType) filters.mono_type = true;
     const matchups = Object.entries(this.defenseMatchups);

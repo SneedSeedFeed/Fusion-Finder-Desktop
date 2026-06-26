@@ -1,6 +1,9 @@
 <script lang="ts">
   import type { Bootstrap } from "$lib/bindings";
-  import type { FilterState } from "$lib/searchFilters.svelte";
+  import type {
+    FilterState,
+    PokemonPosition,
+  } from "$lib/searchFilters.svelte";
   import Combobox from "$lib/Combobox.svelte";
   import TypePicker from "$lib/search/TypePicker.svelte";
   import DefenseMatchupPicker from "$lib/search/DefenseMatchupPicker.svelte";
@@ -33,6 +36,15 @@
     if (ignorePick !== null) {
       filters.addIgnored(ignorePick);
       ignorePick = null;
+    }
+  });
+
+  // same "add then clear" pattern for the contains list (a fusion matches any picked species)
+  let containsPick = $state<number | null>(null);
+  $effect(() => {
+    if (containsPick !== null) {
+      filters.addPokemon(containsPick);
+      containsPick = null;
     }
   });
 </script>
@@ -117,17 +129,52 @@
       >Contains Pokémon</legend
     >
     <div class="mb-1">
-      <Combobox items={pickableSpecies} bind:value={filters.hasPokemon} />
+      <Combobox
+        items={pickableSpecies}
+        bind:value={containsPick}
+        placeholder="-- add a Pokémon --"
+      />
     </div>
-    <select
-      class="w-full rounded border border-gray-700 bg-gray-800 p-1 text-gray-200 disabled:opacity-50"
-      bind:value={filters.pokemonPosition}
-      disabled={filters.hasPokemon === null}
-    >
-      <option value="Either">either side</option>
-      <option value="Head">as head</option>
-      <option value="Body">as body</option>
-    </select>
+    {#if filters.hasPokemon.length}
+      <div class="flex flex-col gap-1">
+        {#each filters.hasPokemon as pick (pick.id)}
+          <div
+            class="flex items-center gap-1 rounded border border-gray-700 bg-gray-800 px-1.5 py-0.5 text-xs"
+          >
+            <span class="flex-1 truncate text-gray-200"
+              >{speciesName.get(pick.id) ?? `#${pick.id}`}</span
+            >
+            <select
+              class="rounded border border-gray-700 bg-gray-900 px-1 py-0.5 text-gray-200"
+              value={pick.position}
+              onchange={(e) =>
+                filters.setPokemonPosition(
+                  pick.id,
+                  e.currentTarget.value as PokemonPosition,
+                )}
+            >
+              <option value="Either">either</option>
+              <option value="Head">head</option>
+              <option value="Body">body</option>
+            </select>
+            <button
+              type="button"
+              class="px-1 text-gray-400 hover:text-red-500"
+              title="Remove from contains list"
+              onclick={() => filters.removePokemon(pick.id)}>×</button
+            >
+          </div>
+        {/each}
+      </div>
+      <label class="mt-2 flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          class="accent-blue-500"
+          bind:checked={filters.hasPokemonBothSides}
+        />
+        Both sides must be in the set
+      </label>
+    {/if}
   </fieldset>
 
   <fieldset class="mb-3 rounded-md border border-gray-800 p-2">

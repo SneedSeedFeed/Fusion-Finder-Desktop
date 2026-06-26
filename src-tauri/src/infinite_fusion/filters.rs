@@ -86,10 +86,14 @@ impl Filters {
         let n = dex.species().len();
         let mut result = RoaringBitmap::new();
 
-        // a species explicitly pinned is exempt from the legendary exclusion asking for a legendary by name shouldn't be cancelled out by "exclude legendaries"
-        let pinned: Option<u32> = self.has_pokemon.map(|has| match has {
-            HasPokemon::Head(p) | HasPokemon::Body(p) | HasPokemon::Either(p) => p.to_u32(),
-        });
+        // The "contains" filter, split into the species allowed as head and as body. Species pinned
+        // here are exempt from the legendary exclusion asking for a legendary by name shouldn't be
+        // cancelled out by "exclude legendaries". Built once and reused per-head for the pin below.
+        let contains = self.has_pokemon.as_ref().map(|has| (has, has.sides()));
+        let picks: RoaringBitmap = match &contains {
+            Some((_, (heads, bodies))) => heads | bodies,
+            None => RoaringBitmap::new(),
+        };
 
         // species (by index) allowed by the id cap, the legendary exclusion and/or the user's block
         // list; both head and body must be allowed. Built once, then intersected per-head like any
@@ -108,7 +112,7 @@ impl Filters {
                     let under_cap = self.block_ids_above.is_none_or(|max| s.id_number <= max);
                     let not_legendary = !self.exclude_legendaries
                         || !legendaries.contains(i as u32)
-                        || pinned == Some(i as u32);
+                        || picks.contains(i as u32);
                     let not_ignored = !ignored.contains(i as u32);
                     (under_cap && not_legendary && not_ignored).then_some(i as u32)
                 })
@@ -145,22 +149,19 @@ impl Filters {
                 and_in(&mut bodies, allowed.clone());
             }
 
-            // pin the chosen species to head, body, or either side
-            if let Some(has) = &self.has_pokemon {
-                match *has {
-                    HasPokemon::Head(p) => {
-                        if head != p {
-                            continue; // this head isn't the chosen species -> no fusions for you
-                        }
+            // pin the chosen species. `head_picks`/`body_picks` are the species allowed on each
+            // side. With `both_sides` off a fusion matches when the head is an allowed-head pick OR
+            // the body is an allowed-body pick; with it on, both must hold.
+            if let Some((has, (head_picks, body_picks))) = &contains {
+                let head_ok = head_picks.contains(head_id as u32);
+                if has.both_sides {
+                    if !head_ok {
+                        continue; // head isn't an allowed pick -> no fusions can satisfy "both"
                     }
-                    HasPokemon::Body(p) => {
-                        and_in(&mut bodies, single(p));
-                    }
-                    HasPokemon::Either(p) => {
-                        if head != p {
-                            and_in(&mut bodies, single(p));
-                        }
-                    }
+                    and_in(&mut bodies, body_picks.clone());
+                } else if !head_ok {
+                    // head doesn't satisfy it on its own, so the body must be an allowed pick
+                    and_in(&mut bodies, body_picks.clone());
                 }
             }
             if let (Some(evo), Some(set)) = (self.evolution, &evo_species) {
@@ -233,18 +234,59 @@ impl Filters {
     }
 }
 
-/// A single-element bitmap, for pinning one species.
-fn single(id: SpeciesId) -> RoaringBitmap {
-    let mut set = RoaringBitmap::new();
-    set.insert(id.to_u32());
-    set
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+pub enum PokemonPosition {
+    Either,
+    Head,
+    Body,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
-pub enum HasPokemon {
-    Either(SpeciesId),
-    Head(SpeciesId),
-    Body(SpeciesId),
+pub struct PokemonPick {
+    pub species: SpeciesId,
+    pub position: PokemonPosition,
+}
+
+/// Constrain fusions by the species they contain.
+/// Each pick names a species and the side(s) it may occupy.
+/// [Self::both_sides] determines if the fusion requires just one or both sides to be from [Self::picks]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HasPokemon {
+    pub picks: Box<[PokemonPick]>,
+    #[serde(default)]
+    pub both_sides: bool,
+}
+
+impl HasPokemon {
+    /// Split the picks into the species allowed as head and as body (Either counts for both).
+    fn sides(&self) -> (RoaringBitmap, RoaringBitmap) {
+        let mut heads = RoaringBitmap::new();
+        let mut bodies = RoaringBitmap::new();
+        for pick in &self.picks {
+            let id = pick.species.to_u32();
+            match pick.position {
+                PokemonPosition::Head => {
+                    heads.insert(id);
+                }
+                PokemonPosition::Body => {
+                    bodies.insert(id);
+                }
+                PokemonPosition::Either => {
+                    heads.insert(id);
+                    bodies.insert(id);
+                }
+            }
+        }
+        (heads, bodies)
+    }
+
+    #[cfg(test)]
+    fn one(species: SpeciesId, position: PokemonPosition) -> Self {
+        HasPokemon {
+            picks: [PokemonPick { species, position }].into(),
+            both_sides: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -766,7 +808,7 @@ pub(crate) mod test {
 
     use super::{
         CustomSpriteFilter, DefenseFilter, DefenseMatchup, EvolutionFilter, Filters, HasAbility,
-        HasMove, HasPokemon, Metric, StatMask, StatRange, StatRanges,
+        HasMove, HasPokemon, Metric, PokemonPick, PokemonPosition, StatMask, StatRange, StatRanges,
         ability_filter::AbilitySource, order_matches, stat_filter::FusedStat,
     };
     use crate::{
@@ -839,7 +881,7 @@ pub(crate) mod test {
         let bulbasaur = dex.species().get_id_of("BULBASAUR").unwrap();
 
         let filters = Filters {
-            has_pokemon: Some(HasPokemon::Either(bulbasaur)),
+            has_pokemon: Some(HasPokemon::one(bulbasaur, PokemonPosition::Either)),
             ..Default::default()
         };
 
@@ -858,24 +900,19 @@ pub(crate) mod test {
         let n = dex.species().len() as u32;
         let bulba = dex.species().get_id_of("BULBASAUR").unwrap().to_u32();
 
+        let bulbasaur = dex.species().get_id_of("BULBASAUR").unwrap();
         let head = Filters {
-            has_pokemon: Some(HasPokemon::Head(
-                dex.species().get_id_of("BULBASAUR").unwrap(),
-            )),
+            has_pokemon: Some(HasPokemon::one(bulbasaur, PokemonPosition::Head)),
             ..Default::default()
         }
         .apply(&dex);
         let body = Filters {
-            has_pokemon: Some(HasPokemon::Body(
-                dex.species().get_id_of("BULBASAUR").unwrap(),
-            )),
+            has_pokemon: Some(HasPokemon::one(bulbasaur, PokemonPosition::Body)),
             ..Default::default()
         }
         .apply(&dex);
         let either = Filters {
-            has_pokemon: Some(HasPokemon::Either(
-                dex.species().get_id_of("BULBASAUR").unwrap(),
-            )),
+            has_pokemon: Some(HasPokemon::one(bulbasaur, PokemonPosition::Either)),
             ..Default::default()
         }
         .apply(&dex);
@@ -885,6 +922,103 @@ pub(crate) mod test {
         assert!(either.iter().all(|id| id / n == bulba || id % n == bulba));
         // either is the union of head and body, overlapping only at bulbasaur/bulbasaur
         assert_eq!(either.len(), head.len() + body.len() - 1);
+    }
+
+    #[test]
+    fn has_pokemon_multiple_is_union_of_each() {
+        let dex = InfiniteFusionDex::from_path(infinite_fusion_dir(), GameVersion::Kanto).unwrap();
+        let bulba = dex.species().get_id_of("BULBASAUR").unwrap();
+        let pikachu = dex.species().get_id_of("PIKACHU").unwrap();
+
+        let pick = |species| PokemonPick {
+            species,
+            position: PokemonPosition::Either,
+        };
+        let multi = Filters {
+            has_pokemon: Some(HasPokemon {
+                picks: [pick(bulba), pick(pikachu)].into(),
+                both_sides: false,
+            }),
+            ..Default::default()
+        }
+        .apply(&dex);
+
+        let only_bulba = Filters {
+            has_pokemon: Some(HasPokemon::one(bulba, PokemonPosition::Either)),
+            ..Default::default()
+        }
+        .apply(&dex);
+        let only_pikachu = Filters {
+            has_pokemon: Some(HasPokemon::one(pikachu, PokemonPosition::Either)),
+            ..Default::default()
+        }
+        .apply(&dex);
+
+        // default (any) semantics: a fusion qualifies if it contains either picked species.
+        let mut expected = only_bulba.clone();
+        expected |= &only_pikachu;
+        assert_eq!(multi, expected);
+        assert!(multi.len() > only_bulba.len());
+    }
+
+    #[test]
+    fn has_pokemon_both_sides_keeps_only_within_set() {
+        let dex = InfiniteFusionDex::from_path(infinite_fusion_dir(), GameVersion::Kanto).unwrap();
+        let n = dex.species().len() as u32;
+        let bulba = dex.species().get_id_of("BULBASAUR").unwrap();
+        let pikachu = dex.species().get_id_of("PIKACHU").unwrap();
+        let set = [bulba.to_u32(), pikachu.to_u32()];
+
+        let pick = |species| PokemonPick {
+            species,
+            position: PokemonPosition::Either,
+        };
+        let both = Filters {
+            has_pokemon: Some(HasPokemon {
+                picks: [pick(bulba), pick(pikachu)].into(),
+                both_sides: true,
+            }),
+            ..Default::default()
+        }
+        .apply(&dex);
+
+        // every component of every match must be in the set -> exactly the 2x2 combinations
+        assert!(
+            both.iter()
+                .all(|id| set.contains(&(id / n)) && set.contains(&(id % n)))
+        );
+        assert_eq!(both.len(), (set.len() * set.len()) as u64);
+    }
+
+    #[test]
+    fn has_pokemon_both_sides_respects_per_pick_position() {
+        let dex = InfiniteFusionDex::from_path(infinite_fusion_dir(), GameVersion::Kanto).unwrap();
+        let n = dex.species().len() as u32;
+        let bulba = dex.species().get_id_of("BULBASAUR").unwrap();
+        let pikachu = dex.species().get_id_of("PIKACHU").unwrap();
+
+        // bulbasaur pinned to head, pikachu to body, both sides required -> the single fusion
+        let only = Filters {
+            has_pokemon: Some(HasPokemon {
+                picks: [
+                    PokemonPick {
+                        species: bulba,
+                        position: PokemonPosition::Head,
+                    },
+                    PokemonPick {
+                        species: pikachu,
+                        position: PokemonPosition::Body,
+                    },
+                ]
+                .into(),
+                both_sides: true,
+            }),
+            ..Default::default()
+        }
+        .apply(&dex);
+
+        let expected: u32 = bulba.to_u32() * n + pikachu.to_u32();
+        assert_eq!(only.iter().collect::<Vec<_>>(), vec![expected]);
     }
 
     #[test]
@@ -1010,7 +1144,7 @@ pub(crate) mod test {
         // side paired with a non-legendary, but other legendaries (Mew) stay excluded.
         let result = Filters {
             exclude_legendaries: true,
-            has_pokemon: Some(HasPokemon::Either(mewtwo)),
+            has_pokemon: Some(HasPokemon::one(mewtwo, PokemonPosition::Either)),
             ..Default::default()
         }
         .apply(&dex);
@@ -1065,7 +1199,7 @@ pub(crate) mod test {
         let bulbasaur = dex.species().get_id_of("BULBASAUR").unwrap();
 
         let matches = Filters {
-            has_pokemon: Some(HasPokemon::Either(bulbasaur)),
+            has_pokemon: Some(HasPokemon::one(bulbasaur, PokemonPosition::Either)),
             ..Default::default()
         }
         .apply(&dex);
@@ -1150,7 +1284,7 @@ pub(crate) mod test {
         let bulbasaur = dex.species().get_id_of("BULBASAUR").unwrap();
 
         let matches = Filters {
-            has_pokemon: Some(HasPokemon::Either(bulbasaur)),
+            has_pokemon: Some(HasPokemon::one(bulbasaur, PokemonPosition::Either)),
             ..Default::default()
         }
         .apply(&dex);
@@ -1200,7 +1334,7 @@ pub(crate) mod test {
         let bulbasaur = dex.species().get_id_of("BULBASAUR").unwrap();
 
         let matches = Filters {
-            has_pokemon: Some(HasPokemon::Either(bulbasaur)),
+            has_pokemon: Some(HasPokemon::one(bulbasaur, PokemonPosition::Either)),
             ..Default::default()
         }
         .apply(&dex);
@@ -1259,7 +1393,7 @@ pub(crate) mod test {
         let curve = super::SpeedCurve::from_speed(&dex.species().stat_distributions());
 
         let matches = Filters {
-            has_pokemon: Some(HasPokemon::Either(bulbasaur)),
+            has_pokemon: Some(HasPokemon::one(bulbasaur, PokemonPosition::Either)),
             ..Default::default()
         }
         .apply(&dex);
@@ -1340,7 +1474,7 @@ pub(crate) mod test {
         let td = super::TypeDefense::build(dex.types());
 
         let matches = Filters {
-            has_pokemon: Some(HasPokemon::Either(bulbasaur)),
+            has_pokemon: Some(HasPokemon::one(bulbasaur, PokemonPosition::Either)),
             ..Default::default()
         }
         .apply(&dex);
@@ -1402,7 +1536,7 @@ pub(crate) mod test {
         let curve = super::SpeedCurve::from_speed(&dex.species().stat_distributions());
 
         let matches = Filters {
-            has_pokemon: Some(HasPokemon::Either(bulbasaur)),
+            has_pokemon: Some(HasPokemon::one(bulbasaur, PokemonPosition::Either)),
             ..Default::default()
         }
         .apply(&dex);
@@ -1441,7 +1575,7 @@ pub(crate) mod test {
         let bulbasaur = dex.species().get_id_of("BULBASAUR").unwrap();
 
         let matches = Filters {
-            has_pokemon: Some(HasPokemon::Either(bulbasaur)),
+            has_pokemon: Some(HasPokemon::one(bulbasaur, PokemonPosition::Either)),
             ..Default::default()
         }
         .apply(&dex);
@@ -1504,7 +1638,7 @@ pub(crate) mod test {
         let n = dex.species().len() as u32;
         let bulbasaur = dex.species().get_id_of("BULBASAUR").unwrap();
         let matches = Filters {
-            has_pokemon: Some(HasPokemon::Either(bulbasaur)),
+            has_pokemon: Some(HasPokemon::one(bulbasaur, PokemonPosition::Either)),
             ..Default::default()
         }
         .apply(&dex);
@@ -1549,7 +1683,7 @@ pub(crate) mod test {
         let bulbasaur = dex.species().get_id_of("BULBASAUR").unwrap();
         let dist = dex.species().stat_distributions();
         let matches = Filters {
-            has_pokemon: Some(HasPokemon::Either(bulbasaur)),
+            has_pokemon: Some(HasPokemon::one(bulbasaur, PokemonPosition::Either)),
             ..Default::default()
         }
         .apply(&dex);
