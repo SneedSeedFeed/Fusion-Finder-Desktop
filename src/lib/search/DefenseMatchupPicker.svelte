@@ -49,7 +49,7 @@
       null
         ? 'opacity-70'
         : ''}"
-      title="t.name"
+      title={t.name}
       aria-label={`${t.name}: ${q === null ? "no constraint" : b.label}`}
       onclick={() => step(t.id, -1)}
       oncontextmenu={(e) => {
