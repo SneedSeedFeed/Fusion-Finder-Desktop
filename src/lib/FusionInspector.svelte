@@ -2,6 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { typeNameMap } from "$lib/typeIcon";
   import type { FusionDetail, NamedId } from "$lib/bindings";
+  import type { Favourites } from "$lib/favourites.svelte";
   import InspectorSprite from "$lib/inspector/InspectorSprite.svelte";
   import InspectorEvolution from "$lib/inspector/InspectorEvolution.svelte";
   import InspectorStats from "$lib/inspector/InspectorStats.svelte";
@@ -14,12 +15,14 @@
     head,
     body,
     types,
+    favourites,
     onClose,
   }: {
     head: number;
     body: number;
     // the bootstrap types table, for resolving the type ids the backend sends
     types: NamedId[];
+    favourites: Favourites;
     onClose: () => void;
   } = $props();
 
@@ -35,6 +38,14 @@
   let b = $state(body);
   let detail = $state<FusionDetail | null>(null);
   let error = $state<string | null>(null);
+
+  // live favourite state for the currently-shown fusion (reactive on both detail + the set)
+  const isFavourite = $derived(
+    detail ? favourites.has(detail.head.dex_id, detail.body.dex_id) : false,
+  );
+  function toggleFavourite() {
+    if (detail) favourites.toggle(detail.head.dex_id, detail.body.dex_id);
+  }
 
   $effect(() => {
     const [hh, bb] = [h, b];
@@ -84,6 +95,16 @@
           </div>
         </div>
         <div class="ml-auto flex items-center gap-2">
+          <button
+            class="rounded border border-gray-700 px-3 py-1 text-sm hover:bg-gray-700 {isFavourite
+              ? 'border-yellow-500/60 bg-yellow-500/10 text-yellow-400'
+              : 'bg-gray-800 text-gray-300'}"
+            aria-pressed={isFavourite}
+            title={isFavourite ? "Remove from favourites" : "Add to favourites"}
+            onclick={toggleFavourite}
+          >
+            {isFavourite ? "★ Favourited" : "☆ Favourite"}
+          </button>
           <button
             class="rounded border border-gray-700 bg-gray-800 px-3 py-1 text-sm hover:bg-gray-700"
             onclick={flip}

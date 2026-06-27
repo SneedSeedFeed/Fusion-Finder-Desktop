@@ -4,6 +4,7 @@
   import Sprite from "$lib/Sprite.svelte";
   import { typeIcon, typeNameMap } from "$lib/typeIcon";
   import type { Bootstrap, FusionCard } from "$lib/bindings";
+  import type { Favourites } from "$lib/favourites.svelte";
 
   // The virtualized results grid: `results` is the full (potentially 250k) list of matching fusion
   // ids, but only the rows in (and near) the viewport are rendered. Each on-screen id is hydrated
@@ -12,10 +13,12 @@
   let {
     options,
     results,
+    favourites,
     onInspect,
   }: {
     options: Bootstrap;
     results: Uint32Array;
+    favourites: Favourites;
     onInspect: (f: { head: number; body: number }) => void;
   } = $props();
 
@@ -30,6 +33,12 @@
   function decode(id: number): { head: number; body: number } {
     const n = options.species_count;
     return { head: Math.floor(id / n), body: id % n };
+  }
+  // favourites are keyed by dex ids; map our species indices through `options.species` to check
+  function isFavourite(head: number, body: number): boolean {
+    const h = options.species[head]?.dex_id;
+    const b = options.species[body]?.dex_id;
+    return h != null && b != null && favourites.has(h, b);
   }
   // backend serves the sprite at fusionsprite://…/{headDex}.{bodyDex}.png (dex ids, not our indices)
   function spriteUrl(head: number, body: number): string {
@@ -148,9 +157,17 @@
           onclick={() => onInspect(f)}
         >
           <div
-            class="mb-1 size-48 shrink-0 overflow-hidden rounded bg-black/30"
+            class="relative mb-1 size-48 shrink-0 overflow-hidden rounded bg-black/30"
           >
             <Sprite src={spriteUrl(f.head, f.body)} size={192} />
+            {#if isFavourite(f.head, f.body)}
+              <span
+                class="absolute right-1 top-1 text-lg leading-none text-yellow-400 drop-shadow-[0_1px_1px_rgba(0,0,0,0.9)]"
+                title="Favourite"
+              >
+                ★
+              </span>
+            {/if}
           </div>
           <div class="mb-1 flex h-4 w-full items-center justify-center gap-1">
             {#each card?.types ?? [] as t (t)}

@@ -1,3 +1,4 @@
+pub mod favourites;
 pub mod infinite_fusion;
 pub mod macros;
 pub mod sprites;
@@ -13,6 +14,7 @@ use tauri::{
     http::{Response, Uri},
 };
 
+use crate::favourites::{Favourite, FavouritesState};
 use crate::infinite_fusion::{
     GameVersion, InfiniteFusionDex,
     area::AreaEncounter,
@@ -211,6 +213,26 @@ fn load_game(
     Ok(config)
 }
 
+/// The user's favourited fusions, by head/body
+#[tauri::command]
+fn favourites(state: State<'_, FavouritesState>) -> Box<[Favourite]> {
+    state.0.read().unwrap().list().iter().copied().collect()
+}
+
+/// Flip whether head,body is a favourite, returns the new state.
+#[tauri::command]
+fn toggle_favourite(
+    app: AppHandle,
+    state: State<'_, FavouritesState>,
+    head_dex: u16,
+    body_dex: u16,
+) -> bool {
+    let mut guard = state.0.write().unwrap();
+    let now_favourite = guard.toggle(Favourite { head_dex, body_dex });
+    favourites::save(&app, &guard);
+    now_favourite
+}
+
 /// Load a `Loaded` (dex + sprites) for a config, mapping every failure to a string.
 /// The sprite service caches custom sheets into the game's own sprite folder (see `SpriteService::new`).
 fn load(config: GameConfig) -> Result<Loaded, String> {
@@ -307,6 +329,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
+        .manage(FavouritesState::default())
         .register_asynchronous_uri_scheme_protocol("fusionsprite", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -314,6 +337,8 @@ pub fn run() {
             });
         })
         .setup(|app| {
+            // favourites live independently of the loaded game (keyed by stable dex ids)
+            *app.state::<FavouritesState>().0.write().unwrap() = favourites::load(app.handle());
             // reload the previously selected game (if any)
             if let Some(config) = load_config(app.handle()) {
                 match load(config) {
@@ -335,7 +360,9 @@ pub fn run() {
             move_card,
             detect_game,
             current_game,
-            load_game
+            load_game,
+            favourites,
+            toggle_favourite
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

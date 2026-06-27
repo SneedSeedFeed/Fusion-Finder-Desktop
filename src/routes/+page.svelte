@@ -9,6 +9,7 @@
   import ResultsGrid from "$lib/search/ResultsGrid.svelte";
   import FilterSidebar from "$lib/search/FilterSidebar.svelte";
   import { FilterState } from "$lib/searchFilters.svelte";
+  import { Favourites } from "$lib/favourites.svelte";
   import {
     SYNERGY_STATS,
     type Bootstrap,
@@ -36,13 +37,44 @@
   // which stats count toward the synergy metrics (all by default); only used by Synergy sorts
   let synergyStats = $state<SynergyStat[]>(SYNERGY_STATS.map((s) => s.value));
 
+  // when on, the grid shows the user's favourites instead of the search results
+  let showFavourites = $state(false);
+
+  // dex id -> our species index for the loaded game (favourites are stored by stable dex id, but
+  // the grid/inspector work in species indices)
+  let dexToIndex = $derived.by(() => {
+    const m = new Map<number, number>();
+    if (options) for (const s of options.species) m.set(s.dex_id, s.id);
+    return m;
+  });
+
+  // favourited fusions that exist in the loaded game, encoded as grid ids (`head * count + body`).
+  // Favourites from another game version whose species aren't present here are skipped.
+  let favouriteIds = $derived.by(() => {
+    if (!options) return new Uint32Array();
+    const n = options.species_count;
+    const ids: number[] = [];
+    for (const f of favourites.entries) {
+      const head = dexToIndex.get(f.head_dex);
+      const body = dexToIndex.get(f.body_dex);
+      if (head != null && body != null) ids.push(head * n + body);
+    }
+    return new Uint32Array(ids);
+  });
+
   // backend always returns the canonical ascending order sort direction is pure presentation, so descending is just this list read in reverse
   // saves us re-computing the set just for flipping from asc to desc
-  let displayed = $derived(sortDesc ? results.toReversed() : results);
+  let displayed = $derived(
+    showFavourites ? favouriteIds : sortDesc ? results.toReversed() : results,
+  );
 
   // $state so it can be passed with `bind:` to FilterSidebar (which binds its sub-properties into
   // child components); the instance is never reassigned, only its reactive fields mutate.
   let filters = $state(new FilterState());
+
+  // starred fusions, keyed by stable national-dex ids; loaded once and shared with the grid +
+  // inspector. Independent of the loaded game.
+  let favourites = $state(new Favourites());
 
   async function runSearch(
     payload: Record<string, unknown>,
@@ -87,6 +119,7 @@
   }
 
   onMount(async () => {
+    favourites.load();
     config = await invoke<GameConfig | null>("current_game");
     if (config) loadDex();
   });
@@ -128,21 +161,28 @@
     {:else}
       <section class="flex min-w-0 flex-1 flex-col">
         <ResultsToolbar
-          count={results.length}
+          count={displayed.length}
           {searching}
           bind:metric
           bind:metric2
           bind:sortDesc
           bind:synergyStats
+          bind:showFavourites
+          favouritesCount={favourites.size}
           version={config.version}
           onChangeGame={() => (changingGame = true)}
           onOpenAreas={() => (showAreas = true)}
         />
-        <ResultsGrid
-          {options}
-          results={displayed}
-          onInspect={(f) => (inspecting = f)}
-        />
+        {#if showFavourites && displayed.length === 0}
+          <p class="p-6 text-center text-gray-400">No favourites yet</p>
+        {:else}
+          <ResultsGrid
+            {options}
+            {favourites}
+            results={displayed}
+            onInspect={(f) => (inspecting = f)}
+          />
+        {/if}
       </section>
 
       <FilterSidebar bind:filters {options} />
@@ -160,6 +200,7 @@
           head={inspecting.head}
           body={inspecting.body}
           types={options.types}
+          {favourites}
           onClose={() => (inspecting = null)}
         />
       {/if}
