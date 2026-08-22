@@ -111,7 +111,7 @@ impl GameVersion {
     pub fn max_fusable_id(self) -> Option<u16> {
         match self {
             GameVersion::Kanto => Some(501),
-            GameVersion::Hoenn => Some(572), // Gastrodon E/W and shellos E/w have no autogen sprites so this cuts them off
+            GameVersion::Hoenn => None,
         }
     }
 }
