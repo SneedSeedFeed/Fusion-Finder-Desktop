@@ -169,7 +169,6 @@
           bind:synergyStats
           bind:showFavourites
           favouritesCount={favourites.size}
-          version={config.version}
           onChangeGame={() => (changingGame = true)}
           onOpenAreas={() => (showAreas = true)}
         />

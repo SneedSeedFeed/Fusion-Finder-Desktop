@@ -91,6 +91,7 @@ pub(crate) struct InfiniteFusionDex {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, strum::EnumString)]
 pub enum GameVersion {
     Kanto,
+    /// Newer versions of kanto are now detected as hoenn so this should probably get renamed some day
     Hoenn,
 }
 

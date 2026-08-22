@@ -19,7 +19,6 @@
     synergyStats = $bindable(),
     showFavourites = $bindable(),
     favouritesCount,
-    version,
     onChangeGame,
     onOpenAreas,
   }: {
@@ -31,7 +30,6 @@
     synergyStats: SynergyStat[];
     showFavourites: boolean;
     favouritesCount: number;
-    version: string;
     onChangeGame: () => void;
     onOpenAreas: () => void;
   } = $props();
@@ -128,7 +126,7 @@
   <button
     type="button"
     class="rounded border border-gray-700 bg-gray-800 px-2 py-1 text-xs text-gray-300 hover:bg-gray-700"
-    title="Change game folder or version"
-    onclick={onChangeGame}>{version} ⚙</button
+    title="Change game folder"
+    onclick={onChangeGame}>⚙</button
   >
 </header>

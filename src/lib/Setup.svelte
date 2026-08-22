@@ -1,12 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { open } from "@tauri-apps/plugin-dialog";
-
-  type GameVersion = "Kanto" | "Hoenn";
-  interface GameConfig {
-    dir: string;
-    version: GameVersion;
-  }
+  import type { GameConfig, GameVersion } from "$lib/bindings";
 
   // onReady fires once a game has loaded; onCancel (optional) backs out of a re-run setup.
   let {
@@ -16,15 +11,10 @@
     $props();
 
   let dir = $state<string | null>(null);
+  // which data layout the picked folder uses. Falls back to Kanto when the folder isn't recognised.
   let detected = $state<GameVersion | null>(null);
-  let version = $state<GameVersion>("Kanto");
   let loading = $state(false);
   let error = $state<string | null>(null);
-
-  const VERSIONS: { value: GameVersion; label: string }[] = [
-    { value: "Kanto", label: "Infinite Fusion (Kanto)" },
-    { value: "Hoenn", label: "Infinite Fusion: Hoenn" },
-  ];
 
   async function browse() {
     error = null;
@@ -35,7 +25,6 @@
     if (typeof picked !== "string") return; // cancelled
     dir = picked;
     detected = await invoke<GameVersion | null>("detect_game", { dir: picked });
-    if (detected) version = detected;
   }
 
   async function loadGame() {
@@ -43,7 +32,10 @@
     loading = true;
     error = null;
     try {
-      const config = await invoke<GameConfig>("load_game", { dir, version });
+      const config = await invoke<GameConfig>("load_game", {
+        dir,
+        version: detected ?? "Kanto",
+      });
       onReady(config);
     } catch (e) {
       error = String(e);
@@ -82,31 +74,8 @@
 
     {#if dir && detected === null}
       <p class="mb-2 text-xs text-amber-400">
-        This doesn't look like an Infinite Fusion folder. Pick the version
-        manually if you're sure.
+        This doesn't look like an Infinite Fusion folder, loading may fail.
       </p>
-    {/if}
-
-    {#if dir}
-      <fieldset class="mb-4 mt-3 rounded-md border border-gray-800 p-2">
-        <legend class="px-1 text-sm font-semibold text-gray-300">Version</legend
-        >
-        {#each VERSIONS as v (v.value)}
-          <label class="flex items-center gap-2 px-1 py-1 text-sm">
-            <input
-              type="radio"
-              class="accent-blue-500"
-              name="version"
-              value={v.value}
-              bind:group={version}
-            />
-            {v.label}
-            {#if detected === v.value}<span class="text-xs text-blue-400"
-                >(detected)</span
-              >{/if}
-          </label>
-        {/each}
-      </fieldset>
     {/if}
 
     {#if error}
