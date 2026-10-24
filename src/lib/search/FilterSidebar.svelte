@@ -1,9 +1,6 @@
 <script lang="ts">
   import type { Bootstrap } from "$lib/bindings";
-  import type {
-    FilterState,
-    PokemonPosition,
-  } from "$lib/searchFilters.svelte";
+  import type { FilterState, PokemonPosition } from "$lib/searchFilters.svelte";
   import Combobox from "$lib/Combobox.svelte";
   import TypePicker from "$lib/search/TypePicker.svelte";
   import DefenseMatchupPicker from "$lib/search/DefenseMatchupPicker.svelte";
@@ -26,7 +23,7 @@
   );
 
   const speciesName = $derived(
-    new Map(options.species.map((s) => [s.id, s.name])),
+    new Map(options.species.map((s) => [s.id, s.display_name ?? s.name])),
   );
 
   // the ignore-list combobox is "add then clear": picking a species folds it into the list and

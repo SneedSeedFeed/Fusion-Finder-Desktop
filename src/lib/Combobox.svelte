@@ -5,6 +5,7 @@
   interface Item {
     id: number;
     name: string;
+    display_name?: string;
   }
 
   let {
@@ -88,10 +89,13 @@
     >
       {#each filtered as item (item.id)}
         <li
-          use:melt={$option({ value: item.id, label: item.name })}
+          use:melt={$option({
+            value: item.id,
+            label: item.display_name ?? item.name,
+          })}
           class="cursor-pointer px-2 py-1 text-sm data-highlighted:bg-blue-600 data-highlighted:text-white data-selected:font-semibold"
         >
-          {item.name}
+          {item.display_name ?? item.name}
         </li>
       {:else}
         <li class="px-2 py-1 text-sm text-gray-400">no matches</li>
