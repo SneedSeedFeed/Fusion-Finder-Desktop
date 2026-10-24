@@ -31,6 +31,28 @@ pub(crate) mod evolution;
 pub(crate) mod level_move;
 pub(crate) mod name_halves;
 
+// i wanted to avoid hard coding as much as I could, but I made a concession here.
+/// Pokemon form names in the data aren't usable, this maps the full pokemon ID to a unique name for use in lists and such
+static NAME_OVERRIDES: phf::Map<&'static str, &'static str> = phf::phf_map! {
+    "ORICORIO_1" => "Oricorio (Baile)",
+    "ORICORIO_2" => "Oricorio (Pom-pom)",
+    "ORICORIO_3" => "Oricorio (Pa'u)",
+    "ORICORIO_4" => "Oricorio (Sensu)",
+    "LYCANROC_D" => "Lycanroc (Midday)",
+    "LYCANROC_N" => "Lycanroc (Midnight)",
+    "MELOETTA_A" => "Meloetta (Aria)",
+    "MELOETTA_P" => "Meloetta (Pirouette)",
+    "MINIOR_M" => "Minior (Meteor)",
+    "MINIOR_C" => "Minior (Core)", // going based off bulbapedia for name here
+    "CASTFORM_SUNNY" => "Castform (Sun)",
+    "CASTFORM_RAINY" => "Castform (Rain)",
+    "CASTFORM_SNOWY" => "Castform (Snow)",
+    "SHELLOS_E" => "Shellos (East)",
+    "SHELLOS_W" => "Shellos (West)",
+    "GASTRODON_E" => "Gastrodon (East)",
+    "GASTRODON_W" => "Gastrodon (West)"
+};
+
 #[derive(Debug, Clone)]
 pub struct SpeciesDex {
     map: IndexMap<Box<str>, SpeciesDetails>,
