@@ -11,7 +11,7 @@
 </script>
 
 <section class="grid gap-4 sm:grid-cols-2">
-  {#each [{ title: detail.head.name, line: detail.head_line }, { title: detail.body.name, line: detail.body_line }] as fam, fi (fi)}
+  {#each [{ title: detail.head.display_name ?? detail.head.name, line: detail.head_line }, { title: detail.body.display_name ?? detail.body.name, line: detail.body_line }] as fam, fi (fi)}
     <div>
       <h3 class="mb-1 border-b border-gray-800 pb-1 font-semibold">
         {fam.title} line
@@ -23,7 +23,7 @@
               {#if node.from_condition}<span class="text-xs text-gray-400"
                   >→ {formatCondition(node.from_condition)}</span
                 >{/if}
-              <span class="font-medium">{node.name}</span>
+              <span class="font-medium">{node.display_name ?? node.name}</span>
               {#each typeIds(node.types) as t, ti (ti)}<img
                   src={typeIcon(typeName(t))}
                   alt={typeName(t)}

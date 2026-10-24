@@ -177,7 +177,7 @@
                 >
                   <td class="py-0.5 pr-2">
                     <span class="flex items-center gap-1">
-                      <span>{e.name}</span>
+                      <span>{e.display_name ?? e.name}</span>
                       {#each typeIds(e.types) as t, ti (ti)}
                         <img
                           src={typeIcon(typeName(t))}

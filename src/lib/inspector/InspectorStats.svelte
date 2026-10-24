@@ -19,7 +19,7 @@
       >
         <span class="text-gray-500">{STAT_LABELS[i]}</span>
         <span class="text-right font-semibold tabular-nums">{s.value}</span>
-        {#each [{ d: s.value - s.head, who: detail.head.name }, { d: s.value - s.body, who: detail.body.name }] as cmp, i (i)}
+        {#each [{ d: s.value - s.head, who: detail.head.display_name ?? detail.head.name }, { d: s.value - s.body, who: detail.body.display_name ?? detail.body.name }] as cmp, i (i)}
           <span
             class="tabular-nums {cmp.d > 0
               ? 'text-green-400'

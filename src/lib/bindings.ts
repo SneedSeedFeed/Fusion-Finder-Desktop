@@ -89,6 +89,7 @@ export interface ComponentBrief {
   index: number;
   dex_id: number;
   name: string;
+  display_name?: string;
 }
 // no label — the front end knows the 7 stats by position (HP, ATK, DEF, SP.ATK, SP.DEF, SPEED, TOTAL)
 export interface StatRow {
@@ -121,6 +122,7 @@ export interface AreaEncounter {
   species: number;
   dex_id: number;
   name: string;
+  display_name?: string;
   types: [number, number | null];
   method: string;
   chance: number;
@@ -200,6 +202,7 @@ export interface LearnSources {
 export interface EvoNode {
   dex_id: number;
   name: string;
+  display_name?: string;
   // (primary, optional secondary) type ids
   types: [number, number | null];
   from_condition: EvoCondition | null;

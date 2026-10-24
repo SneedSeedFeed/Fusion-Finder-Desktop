@@ -27,7 +27,7 @@
 
   const filtered = $derived.by(() => {
     const q = $inputValue.trim().toLowerCase();
-    return q ? items.filter((i) => i.name.toLowerCase().includes(q)) : items;
+    return q ? items.filter((i) => (i.display_name ?? i.name).toLowerCase().includes(q) || i.name.toLowerCase().includes(q)) : items;
   });
 
   // melt doesn't sync the input text to the selection on its own — when the menu closes,
@@ -48,8 +48,8 @@
     } else {
       const item = items.find((i) => i.id === value);
       if (item) {
-        selected.set({ value: item.id, label: item.name });
-        inputValue.set(item.name);
+        selected.set({ value: item.id, label: item.display_name ?? item.name });
+        inputValue.set(item.display_name ?? item.name);
       }
     }
   });

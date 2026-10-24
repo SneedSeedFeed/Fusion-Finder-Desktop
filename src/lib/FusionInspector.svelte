@@ -90,8 +90,9 @@
         <div>
           <div class="text-lg font-semibold">{detail.fusion_name}</div>
           <div class="text-xs text-gray-500">
-            #{detail.head.dex_id}.{detail.body.dex_id} · {detail.head.name} / {detail
-              .body.name}
+            #{detail.head.dex_id}.{detail.body.dex_id} · {detail.head
+              .display_name ?? detail.head.name} / {detail.body.display_name ??
+              detail.body.name}
           </div>
         </div>
         <div class="ml-auto flex items-center gap-2">

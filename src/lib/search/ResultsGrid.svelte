@@ -27,7 +27,8 @@
     return typeNames.get(id) ?? "";
   }
   function speciesName(id: number): string {
-    return options.species[id]?.name ?? `#${id}`;
+    let species = options.species[id];
+    return species?.display_name ?? species?.name ?? `#${id}`;
   }
   // a fusion id decodes to head/body species indices (`head * species_count + body`)
   function decode(id: number): { head: number; body: number } {

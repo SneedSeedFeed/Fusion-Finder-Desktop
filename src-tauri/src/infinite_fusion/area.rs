@@ -16,6 +16,8 @@ pub struct AreaEncounter {
     pub species: SpeciesId,
     pub dex_id: u16,
     pub name: Box<str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<&'static str>,
     pub types: (TypeId, Option<TypeId>),
     pub method: EncounterMethod,
     pub chance: u8,
@@ -57,6 +59,7 @@ impl InfiniteFusionDex {
                     species: e.species,
                     dex_id: s.id_number,
                     name: s.name.clone(),
+                    display_name: s.display_name,
                     types: (s.type1, s.type2),
                     method: e.method,
                     chance: e.chance,

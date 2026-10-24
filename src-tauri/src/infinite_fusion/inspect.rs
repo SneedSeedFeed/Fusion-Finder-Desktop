@@ -52,6 +52,8 @@ pub struct ComponentBrief {
     /// in-game dex number (for sprite urls)
     pub dex_id: u16,
     pub name: Box<str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<&'static str>,
 }
 
 /// One fused stat vs. each parent. No label — the front end knows the 7 stats by position (the
@@ -129,6 +131,8 @@ pub enum EvoCondition {
 pub struct EvoNode {
     pub dex_id: u16,
     pub name: Box<str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<&'static str>,
     pub types: (TypeId, Option<TypeId>),
     /// how this member is reached from the previous one in the line, if any
     pub from_condition: Option<EvoCondition>,
@@ -255,6 +259,7 @@ impl InfiniteFusionDex {
             index: id,
             dex_id: s.id_number,
             name: s.name.clone(),
+            display_name: s.display_name,
         }
     }
 
@@ -336,6 +341,7 @@ impl InfiniteFusionDex {
                 EvoNode {
                     dex_id: s.id_number,
                     name: s.name.clone(),
+                    display_name: s.display_name,
                     types,
                     from_condition,
                     encounters: self.encounter_rows(id),
