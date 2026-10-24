@@ -44,6 +44,7 @@ export interface SpeciesOption {
   id: number;
   dex_id: number;
   name: string;
+  display_name?: string;
 }
 export interface Range {
   min: number;

@@ -61,6 +61,8 @@ pub struct SpeciesOption {
     /// in-game dex number (`id_number`); used to build sprite URLs, distinct from `id` (our index)
     pub dex_id: u16,
     pub name: Box<str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]

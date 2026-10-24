@@ -336,6 +336,7 @@ impl InfiniteFusionDex {
                 id: SpeciesId::from_usize(i),
                 dex_id: s.id_number,
                 name: s.name.clone(),
+                display_name: s.display_name,
             })
             .collect();
 
