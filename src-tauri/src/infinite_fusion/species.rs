@@ -109,6 +109,7 @@ dex_id!(SpeciesId, u16);
 pub struct SpeciesDetails {
     pub id_number: u16,
     pub name: Box<str>,
+    pub display_name: Option<&'static str>,
     pub names: NameHalves,
     pub type1: TypeId,
     pub type2: Option<TypeId>,
@@ -227,6 +228,7 @@ impl UnmappedSpeciesDetails<'_> {
             id_number,
             name: self.name.into(),
             names,
+            display_name: NAME_OVERRIDES.get(symbol).copied(),
             type1,
             type2,
             base_stats: self.base_stats,
