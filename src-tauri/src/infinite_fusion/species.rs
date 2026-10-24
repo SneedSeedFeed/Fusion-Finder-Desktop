@@ -50,7 +50,8 @@ static NAME_OVERRIDES: phf::Map<&'static str, &'static str> = phf::phf_map! {
     "SHELLOS_E" => "Shellos (East)",
     "SHELLOS_W" => "Shellos (West)",
     "GASTRODON_E" => "Gastrodon (East)",
-    "GASTRODON_W" => "Gastrodon (West)"
+    "GASTRODON_W" => "Gastrodon (West)",
+    "U_NECROZMA" => "Ultra Necrozma",
 };
 
 #[derive(Debug, Clone)]
